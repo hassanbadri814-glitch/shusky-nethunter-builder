@@ -344,58 +344,60 @@ jobs:
           cd workspace
           python3 - <<'PY'
           from pathlib import Path
-          
+
+          # 1. Leer common_kernels.bzl om module_outs te accepteren en dubbele entries te filteren
           p = Path("build/kernel/kleaf/common_kernels.bzl")
           s = p.read_text()
-          signature = " module_implicit_outs = None,\n"
-          s = s.replace(signature, signature + " module_outs = None,\n", 1)
-          forwarding = " module_implicit_outs = module_implicit_outs,\n"
-          s = s.replace(forwarding, forwarding + " module_outs = module_outs,\n")
+
+          signature = "        module_implicit_outs = None,\n"
+          assert s.count(signature) == 1, "Unexpected common_kernels.bzl signature"
+          s = s.replace(
+              signature,
+              signature + "        module_outs = None,\n",
+              1
+          )
+
+          forwarding = "        module_implicit_outs = module_implicit_outs,\n"
+          assert s.count(forwarding) == 2, "Unexpected module forwarding locations"
+          s = s.replace(
+              forwarding,
+              forwarding + "        module_outs = [m for m in (module_outs or []) if m not in (module_implicit_outs or [])],\n"
+          )
+
           p.write_text(s)
-          
+          print("Updated common_kernels.bzl with deduplication.")
+
+          # 2. Registreer alleen onze echte extra NetHunter- & RTL8187-modules
           p = Path("aosp/BUILD.bazel")
           s = p.read_text()
-          needle = ' "module_implicit_outs": get_gki_modules_list("arm64"),\n'
-          if needle not in s:
-              raise SystemExit("Could not find kernel_aarch64 configuration.")
-              
-          modules = [
-              "drivers/bluetooth/btintel.ko",
-              "drivers/bluetooth/btrtl.ko",
-              "drivers/bluetooth/btusb.ko",
+
+          needle = '        "module_implicit_outs": get_gki_modules_list("arm64"),\n'
+          assert s.count(needle) >= 1, "Could not find kernel_aarch64 configuration"
+
+          module_list = '''        "module_outs": [
               "drivers/misc/eeprom/eeprom_93cx6.ko",
-              "drivers/net/can/can.ko",
-              "drivers/net/can/dev/can-dev.ko",
-              "drivers/net/can/raw/can-raw.ko",
-              "drivers/net/can/slcan/slcan.ko",
-              "drivers/net/can/usb/gs_usb.ko",
-              "drivers/net/usb/ax88179_178a.ko",
-              "drivers/net/usb/r8152.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
               "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
               "drivers/net/wireless/realtek/rtl8812au/8812au.ko",
-              "drivers/usb/class/cdc-acm.ko",
-              "drivers/usb/serial/ch341.ko",
+              "drivers/bluetooth/btintel.ko",
               "drivers/usb/serial/cp210x.ko",
-              "drivers/usb/serial/ftdi_sio.ko",
-              "drivers/usb/serial/usbserial.ko",
-              "net/mac80211/mac80211.ko",
+              "drivers/bluetooth/btrtl.ko",
+              "drivers/usb/serial/ch341.ko",
               "net/wireless/cfg80211.ko",
-          ]
-          
-          module_list = '\n "module_outs": [\n'
-          for mod in modules:
-              module_list += f'    "{mod}",\n'
-          module_list += ' ],\n'
-          
+              "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76.ko",
+              "drivers/bluetooth/btusb.ko",
+              "net/mac80211/mac80211.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
+              "drivers/net/can/usb/gs_usb.ko",
+          ],
+          '''
+
           s = s.replace(needle, needle + module_list, 1)
           p.write_text(s)
-          print("Updated aosp/BUILD.bazel successfully.")
+          print("Registered additional module outputs successfully.")
           PY
 
       - name: Create Local FIPS140 Dummy Repository
@@ -418,7 +420,6 @@ jobs:
       - name: Compile Pixel 8 Pro Kernel via Bazel
         run: |
           cd workspace
-          # FIX: Gebruik exact de build_shusky.sh aanroep met de override_repository vlag
           ./build_shusky.sh \
             --kernel_package=@//aosp \
             --//build/kernel/kleaf:use_prebuilt_gki=false \
