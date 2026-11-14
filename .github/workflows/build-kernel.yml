@@ -1,5 +1,4 @@
-name: Build Pixel 8 Pro (shusky) - NetHunter + KernelSU-Next (v1.33)
-
+name: Build Pixel 8 Pro (shusky) - NetHunter + KernelSU-Next (v1.33-rtl8187)
 on:
   push:
     branches:
@@ -11,7 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CUSTOM_KERNEL_VERSION: "1.33"
-
     steps:
       - name: Free Runner Disk Space
         run: |
@@ -27,7 +25,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc build-essential curl flex bison
           sudo apt-get install -y libssl-dev libelf-dev python3 repo
-          sudo apt-get install -y git zip libncurses5-dev wget
+          sudo apt-get install -y git zip libncurses5-dev wget unzip
 
       - name: Configure Git Credentials
         run: |
@@ -40,7 +38,7 @@ jobs:
           path: |
             ~/.cache/bazel
             workspace/out/bazel
-          key: ${{ runner.os }}-bazel-shusky-v133
+          key: ${{ runner.os }}-bazel-shusky-v133-rtl8187
           restore-keys: |
             ${{ runner.os }}-bazel-shusky-
 
@@ -53,41 +51,6 @@ jobs:
           repo init -u "$MANIFEST" -b "$BRANCH" --depth=1
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle
 
-      - name: Inspect Kleaf Build Configuration
-        run: |
-          cd workspace
-
-          echo "===== DEFINE COMMON KERNELS ====="
-          nl -ba build/kernel/kleaf/common_kernels.bzl | sed -n '470,575p'
-
-          echo "===== KERNEL BUILD IMPLEMENTATION ====="
-          nl -ba build/kernel/kleaf/common_kernels.bzl | sed -n '625,750p'
-
-          echo "===== AOSP KERNEL TARGETS ====="
-          nl -ba aosp/BUILD.bazel | sed -n '135,170p'
-
-      - name: Inspect AOSP Bazel Kernel Definition
-        run: |
-          cd workspace
-          echo "===== AOSP BUILD.bazel ====="
-          sed -n '1,240p' aosp/BUILD.bazel
-          echo "===== SHUSKY BUILD.bazel ====="
-          grep -n -A35 -B10 "module_outs" \
-            private/devices/google/shusky/BUILD.bazel
-          echo "===== SHUSKY BUILD FILE: TOP ====="
-          sed -n '1,100p' private/devices/google/shusky/BUILD.bazel
-
-          echo "===== ZUMA MODULE OUTPUT DEFINITION ====="
-          grep -R -n -A100 -B10 "ZUMA_MODULE_OUTS" private/devices/google/zuma private/devices/google/shusky
-        
-      - name: Dump Build.bazel Files for Review
-        uses: actions/upload-artifact@v4
-        with:
-          name: bazel-build-scripts
-          path: |
-            workspace/aosp/BUILD.bazel
-            workspace/private/devices/google/shusky/BUILD.bazel
-            
       - name: Apply Kali NetHunter Subsystem Overrides
         run: |
           cd workspace/aosp
@@ -104,7 +67,7 @@ jobs:
           rm -rf "$RTL_DIR/rtw88" "$RTL_DIR/rtl8812au"
           mkdir -p "$RTL_DIR/rtw88"
           touch "$RTL_DIR/rtw88/Kconfig"
-          REPO="https://github.com/stoag/8812au-20210820.git"
+          REPO="https://github.com/morrownr/8812au-20210629.git"
           git clone "$REPO" "$RTL_DIR/rtl8812au"
           rm -rf "$RTL_DIR/rtl8812au/.git"
           MK="$RTL_DIR/rtl8812au/Makefile"
@@ -121,10 +84,10 @@ jobs:
       - name: Apply KernelSU-Next & NetHunter Configs
         run: |
           cd workspace/aosp
-          KSU_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
-          curl -LSs "$KSU_URL" | bash -
+          KSU_URL="https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh"
+          curl -LSs "$KSU_URL" | bash -s next
           KSU_GIT_VER=$(git -C KernelSU-Next rev-list --count HEAD)
-          KSU_TAG=$(git -C KernelSU-Next describe --tags --abbrev=0 2>/dev/null || echo "v3.4.2")
+          KSU_TAG=$(git -C KernelSU-Next describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
           KB="KernelSU-Next/kernel/Kbuild"
           sed -i "s/KSU_GIT_VERSION := .*/KSU_GIT_VERSION := ${KSU_GIT_VER}/g" "$KB"
           sed -i "s/KSU_VERSION_TAG := .*/KSU_VERSION_TAG := ${KSU_TAG}/g" "$KB"
@@ -192,6 +155,8 @@ jobs:
             echo 'CONFIG_CFG80211_CERTIFICATION_ONUS=y'
             echo 'CONFIG_WIRELESS=y'
             echo 'CONFIG_WLAN_VENDOR_REALTEK=y'
+            echo 'CONFIG_EEPROM_93CX6=m'
+            echo 'CONFIG_RTL8187=m'
             echo 'CONFIG_WLAN_VENDOR_MEDIATEK=y'
             echo 'CONFIG_MT76_CORE=m'
             echo 'CONFIG_MT76_USB=m'
@@ -235,6 +200,8 @@ jobs:
             echo 'dev_coredumpv'
             echo 'dev_set_threaded'
             echo 'device_release_driver'
+            echo 'eeprom_93cx6_multiread'
+            echo 'eeprom_93cx6_read'
             echo 'firmware_request_cache'
             echo 'flush_signals'
             echo 'gpiod_get_optional'
@@ -313,166 +280,81 @@ jobs:
       - name: Register Additional Modules in Zuma Kleaf Constants
         run: |
           cd workspace
-
           python3 - <<'PY'
           from pathlib import Path
           import re
-
-          build_file = Path(
-              "private/devices/google/zuma/constants.bzl"
-          )
-
+          build_file = Path("private/devices/google/zuma/constants.bzl")
           if not build_file.is_file():
-              raise SystemExit(
-                  f"Missing expected file: {build_file}"
-              )
-
-          build_file.chmod(
-              build_file.stat().st_mode | 0o200
-          )
-
+              raise SystemExit(f"Missing expected file: {build_file}")
+          build_file.chmod(build_file.stat().st_mode | 0o200)
           source = build_file.read_text()
-
-          # Locate the shared ZUMA_MODULE_OUTS list.
-          pattern = re.compile(
-              r"(?ms)^(ZUMA_MODULE_OUTS\s*=\s*\[)(.*?)(^\])"
-          )
-
+          pattern = re.compile(r"(?ms)^(ZUMA_MODULE_OUTS\s*=\s*)(.*?)(^)")
           match = pattern.search(source)
-
           if not match:
-              raise SystemExit(
-                  "Could not locate ZUMA_MODULE_OUTS list. "
-                  "No changes made."
-              )
-
+              raise SystemExit("Could not locate ZUMA_MODULE_OUTS list. No changes made.")
           header, body, closing = match.groups()
-
-          # These are the additional modules identified
-          # in the previous Bazel build output.
           additions = {
               "drivers/bluetooth/btintel.ko",
+              "drivers/misc/eeprom/eeprom_93cx6.ko",
               "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
               "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
               "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
+              "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
               "drivers/net/wireless/realtek/rtl8812au/8812au.ko",
           }
-
-          existing = set(
-              re.findall(
-                  r'"([^"]+\.ko)"',
-                  body
-              )
-          )
-
+          existing = set(re.findall(r'"([^"]+\.ko)"', body))
           combined = sorted(existing | additions)
-
-          # Preserve existing comments in the list.
-          comments = [
-              line for line in body.splitlines()
-              if line.strip().startswith("#")
-          ]
-
+          comments = [line for line in body.splitlines() if line.strip().startswith("#")]
           new_body = "\n"
-
           for comment in comments:
               new_body += comment + "\n"
-
           for module in combined:
-              new_body += f'    "{module}",\n'
-
+              new_body += f' "{module}",\n'
           replacement = header + new_body + closing
-
-          updated = (
-              source[:match.start()]
-              + replacement
-              + source[match.end():]
-          )
-
+          updated = source[:match.start()] + replacement + source[match.end():]
           build_file.write_text(updated)
-
-          print("Updated:", build_file)
-          print("Existing module entries:", len(existing))
-          print("Additional entries:", len(additions - existing))
-          print("\nFinal ZUMA_MODULE_OUTS:")
-
-          for module in combined:
-              print("  " + module)
           PY
-
-          echo "===== UPDATED ZUMA MODULE OUTPUTS ====="
-          grep -n -A45 "ZUMA_MODULE_OUTS" \
-            private/devices/google/zuma/constants.bzl
-
-          echo "===== UPDATED AOSP KERNEL CONFIGURATION ====="
-          sed -n '1,100p' aosp/BUILD.bazel
-
+          grep -n -A45 "ZUMA_MODULE_OUTS" private/devices/google/zuma/constants.bzl
 
       - name: Enable Kleaf Module Outputs
         run: |
           cd workspace
-
           python3 - <<'PY'
           from pathlib import Path
-
-          # First, teach the common-kernel wrapper to accept and forward module_outs.
           p = Path("build/kernel/kleaf/common_kernels.bzl")
           s = p.read_text()
-
-          signature = "        module_implicit_outs = None,\n"
-          assert s.count(signature) == 1, "Unexpected common_kernels.bzl signature"
-          s = s.replace(
-              signature,
-              signature + "        module_outs = None,\n",
-              1
-          )
-
-          forwarding = "        module_implicit_outs = module_implicit_outs,\n"
-          assert s.count(forwarding) == 2, "Unexpected module forwarding locations"
-          s = s.replace(
-              forwarding,
-              forwarding + "        module_outs = module_outs,\n"
-          )
-
+          signature = " module_implicit_outs = None,\n"
+          s = s.replace(signature, signature + " module_outs = None,\n", 1)
+          forwarding = " module_implicit_outs = module_implicit_outs,\n"
+          s = s.replace(forwarding, forwarding + " module_outs = module_outs,\n")
           p.write_text(s)
-          print("Updated common_kernels.bzl successfully.")
-
-          # Next, register the additional modules for kernel_aarch64.
+          
           p = Path("aosp/BUILD.bazel")
           s = p.read_text()
-
-          needle = '        "module_implicit_outs": get_gki_modules_list("arm64"),\n'
-          assert s.count(needle) >= 1, "Could not find kernel_aarch64 configuration"
-
-          module_list = '''        "module_outs": [
-              "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
-              "drivers/net/wireless/realtek/rtl8812au/8812au.ko",
-              "drivers/bluetooth/btintel.ko",
-              "drivers/usb/serial/cp210x.ko",
-              "drivers/bluetooth/btrtl.ko",
-              "drivers/usb/serial/ch341.ko",
-              "net/wireless/cfg80211.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76.ko",
-              "drivers/bluetooth/btusb.ko",
-              "net/mac80211/mac80211.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
-              "drivers/net/can/usb/gs_usb.ko",
+          needle = ' "module_implicit_outs": get_gki_modules_list("arm64"),\n'
+          module_list = ''' "module_outs": [
+            "drivers/misc/eeprom/eeprom_93cx6.ko",
+            "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
+            "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
+            "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
+            "drivers/net/wireless/realtek/rtl8812au/8812au.ko",
+            "drivers/bluetooth/btintel.ko",
+            "drivers/usb/serial/cp210x.ko",
+            "drivers/bluetooth/btrtl.ko",
+            "drivers/usb/serial/ch341.ko",
+            "net/wireless/cfg80211.ko",
+            "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
+            "drivers/net/wireless/mediatek/mt76/mt76.ko",
+            "drivers/bluetooth/btusb.ko",
+            "net/mac80211/mac80211.ko",
+            "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
+            "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
+            "drivers/net/can/usb/gs_usb.ko",
           ],
           '''
-
           s = s.replace(needle, needle + module_list, 1)
           p.write_text(s)
-          print("Registered additional module outputs successfully.")
           PY
-
-          echo "===== VERIFY COMMON KERNEL PATCH ====="
-          grep -n -A3 -B3 'module_outs' build/kernel/kleaf/common_kernels.bzl
-
-          echo "===== VERIFY AOSP MODULE LIST ====="
-          sed -n '138,175p' aosp/BUILD.bazel
 
       - name: Compile Pixel 8 Pro Kernel via Bazel
         run: |
@@ -488,25 +370,31 @@ jobs:
         run: |
           cd workspace
           rm -rf bundle AnyKernel3
-          git clone https://github.com/stoag/AnyKernel3-Pixel8Pro.git AnyKernel3
+          git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           mkdir -p bundle AnyKernel3/twk_drivers AnyKernel3/twk_firmware
-          BB_URL="https://raw.githubusercontent.com/xerta555/Busybox-Binaries/master/busybox-arm64"
+          
+          BB_URL="https://raw.githubusercontent.com/Magisk-Modules-Repo/busybox-ndk/master/busybox-arm64"
           wget -qO AnyKernel3/tools/busybox "$BB_URL"
           chmod +x AnyKernel3/tools/busybox
+          
           MG_URL="https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk"
           wget -qO magisk.zip "$MG_URL"
           unzip -j magisk.zip lib/arm64-v8a/libmagiskboot.so
           mv libmagiskboot.so AnyKernel3/tools/magiskboot
           chmod +x AnyKernel3/tools/magiskboot
           rm -f magisk.zip
+          
           cp -L out/shusky/dist/Image.lz4 AnyKernel3/
+          
           FW_URL="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain"
           for fw in mt7662.bin mt7662_rom_patch.bin mt7662u.bin mt7662u_rom_patch.bin; do
-            curl -fLSs "$FW_URL/mediatek/$fw" -o "AnyKernel3/twk_firmware/$fw" \
-              || curl -fLSs "$FW_URL/$fw" -o "AnyKernel3/twk_firmware/$fw" || true
+            curl -fLSs "$FW_URL/mediatek/$fw" -o "AnyKernel3/twk_firmware/$fw" || \
+            curl -fLSs "$FW_URL/$fw" -o "AnyKernel3/twk_firmware/$fw" || true
           done
           curl -fLSs "$FW_URL/rt2870.bin" -o AnyKernel3/twk_firmware/rt2870.bin || true
+          
           for ko in \
+            eeprom_93cx6.ko rtl8187.ko \
             8812au.ko mt76.ko mt76-usb.ko mt76x02-lib.ko mt76x02-usb.ko \
             mt76x2-common.ko mt76x2u.ko btintel.ko btrtl.ko btusb.ko \
             cdc-acm.ko usbserial.ko ch341.ko cp210x.ko ftdi_sio.ko \
@@ -515,14 +403,13 @@ jobs:
             if [ -f "out/shusky/dist/$ko" ]; then
               cp -L "out/shusky/dist/$ko" AnyKernel3/twk_drivers/
             else
-              find out/ -path "*/dist/$ko" \
-                -exec cp -L {} AnyKernel3/twk_drivers/ \; -quit 2>/dev/null || true
+              find out/ -path "*/dist/$ko" -exec cp -L {} AnyKernel3/twk_drivers/ \; -quit 2>/dev/null || true
             fi
           done
-          ls -lh AnyKernel3/twk_drivers/
-          ls -lh AnyKernel3/twk_firmware/
+          
           VER="${{ env.CUSTOM_KERNEL_VERSION }}"
           sed -i "s/kernel.string=.*/kernel.string=Tweaker Kernel (v${VER})/g" AnyKernel3/anykernel.sh
+          
           {
             echo '# --- TWEAKER KERNEL NON-SHADOWING ADAPTER INJECTION ---'
             echo 'ui_print " ";'
@@ -542,7 +429,7 @@ jobs:
             echo 'SV="$MOD_DIR/service.sh"'
             echo 'echo "#!/system/bin/sh" > "$SV"'
             echo 'echo "MOD_DIR=/data/adb/modules/twk_nethunter_adapters" >> "$SV"'
-            echo 'echo "while [ \"\$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 2; done" >> "$SV"'
+            echo 'echo "while [ \$(getprop sys.boot_completed) != 1 ]; do sleep 2; done" >> "$SV"'
             echo 'echo "mkdir -p /dev/twk_modules /dev/twk_firmware" >> "$SV"'
             echo 'echo "LOG=/dev/twk_modules/load.log" >> "$SV"'
             echo 'echo "ln -sf /vendor/firmware/* /dev/twk_firmware/ 2>/dev/null || true" >> "$SV"'
@@ -550,23 +437,23 @@ jobs:
             echo 'echo "cp -f \$MOD_DIR/twk_firmware/*.bin /dev/twk_firmware/ 2>/dev/null || true" >> "$SV"'
             echo 'echo "cp -f \$MOD_DIR/twk_modules/*.ko /dev/twk_modules/ 2>/dev/null || true" >> "$SV"'
             echo 'echo "echo -n /dev/twk_firmware > /sys/module/firmware_class/parameters/path" >> "$SV"'
-            echo 'for m in btintel.ko btrtl.ko btusb.ko mt76.ko mt76-usb.ko mt76x02-lib.ko mt76x02-usb.ko mt76x2-common.ko mt76x2u.ko cdc-acm.ko usbserial.ko ch341.ko cp210x.ko ftdi_sio.ko ax88179_178a.ko r8152.ko can.ko can-raw.ko can-dev.ko slcan.ko gs_usb.ko; do'
-            echo '  echo "[ -f /dev/twk_modules/$m ] && insmod /dev/twk_modules/$m >> \$LOG 2>&1 || true" >> "$SV"'
+            echo 'for m in eeprom_93cx6.ko rtl8187.ko btintel.ko btrtl.ko btusb.ko mt76.ko mt76-usb.ko mt76x02-lib.ko mt76x02-usb.ko mt76x2-common.ko mt76x2u.ko cdc-acm.ko usbserial.ko ch341.ko cp210x.ko ftdi_sio.ko ax88179_178a.ko r8152.ko can.ko can-raw.ko can-dev.ko slcan.ko gs_usb.ko; do'
+            echo ' echo "[ -f /dev/twk_modules/$m ] && insmod /dev/twk_modules/$m >> $LOG 2>&1 || true" >> "$SV"'
             echo 'done'
-            echo 'echo "[ -f /dev/twk_modules/8812au.ko ] && insmod /dev/twk_modules/8812au.ko rtw_drv_log_level=6 rtw_power_mgnt=0 rtw_switch_usb_mode=0 >> \$LOG 2>&1 || true" >> "$SV"'
+            echo 'echo "[ -f /dev/twk_modules/8812au.ko ] && insmod /dev/twk_modules/8812au.ko rtw_drv_log_level=6 rtw_power_mgnt=0 rtw_switch_usb_mode=0 >> $LOG 2>&1 || true" >> "$SV"'
             echo 'chmod +x "$SV"'
             echo 'ui_print "- Non-shadowing drivers & firmware staged successfully!";'
           } >> AnyKernel3/anykernel.sh
+          
           (cd AnyKernel3 && zip -r9 "../bundle/twk-v${VER}-anykernel3.zip" * -x .git README.md)
+          
           for img in vendor_kernel_boot.img vendor_dlkm.img system_dlkm.img; do
             if [ -f "out/shusky/dist/$img" ]; then
               cp -L "out/shusky/dist/$img" "bundle/twk-v${VER}-$img"
             else
-              find out/ -type f -name "$img" \
-                -exec cp -L {} "bundle/twk-v${VER}-$img" \; -quit
+              find out/ -type f -name "$img" -exec cp -L {} "bundle/twk-v${VER}-$img" \; -quit
             fi
           done
-          ls -lh bundle/
 
       - name: Upload Flat Release Bundle (Single Zip)
         uses: actions/upload-artifact@v4
@@ -574,16 +461,3 @@ jobs:
           name: twk-v${{ env.CUSTOM_KERNEL_VERSION }}-release-package
           path: workspace/bundle/*
           if-no-files-found: error
-
-      - name: Ping Phone - Success
-        if: success()
-        run: |
-          MSG="✅ Pixel 8 Pro Kernel Build (v${{ env.CUSTOM_KERNEL_VERSION }}) COMPLETE!"
-          curl -d "$MSG" https://ntfy.sh/twk_pixel8_build_alerts
-
-      - name: Ping Phone - Failure
-        if: failure()
-        run: |
-          MSG="❌ Pixel 8 Pro Kernel Build (v${{ env.CUSTOM_KERNEL_VERSION }}) FAILED!"
-          curl -d "$MSG" https://ntfy.sh/twk_pixel8_build_alerts
-# END OF WORKFLOW
