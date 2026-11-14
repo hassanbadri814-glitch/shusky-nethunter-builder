@@ -46,7 +46,6 @@ jobs:
         run: |
           mkdir -p workspace
           cd workspace
-          # FIX: Correcte, volledige URL naar de Android Kernel Manifest repository
           MANIFEST="https://android.googlesource.com/kernel/manifest"
           BRANCH="android-gs-shusky-6.1-android16"
           repo init -u "$MANIFEST" -b "$BRANCH" --depth=1
@@ -60,7 +59,7 @@ jobs:
           sed -i 's/config MAC80211_LEDS/config MAC80211_LEDS\n\tdepends on BROKEN/g' \
             net/mac80211/Kconfig
 
-      - name: Inject Morrownr Linux 6.1-Ready Driver (8812AU)
+      - name: Inject 8812AU Driver (stoag fork)
         run: |
           cd workspace/aosp
           RTL_DIR="drivers/net/wireless/realtek"
@@ -68,8 +67,7 @@ jobs:
           rm -rf "$RTL_DIR/rtw88" "$RTL_DIR/rtl8812au"
           mkdir -p "$RTL_DIR/rtw88"
           touch "$RTL_DIR/rtw88/Kconfig"
-          # FIX: Correcte URL naar de morrownr repository
-          REPO="https://github.com/morrownr/8812au-20210629.git"
+          REPO="https://github.com/stoag/8812au-20210820.git"
           git clone "$REPO" "$RTL_DIR/rtl8812au"
           rm -rf "$RTL_DIR/rtl8812au/.git"
           MK="$RTL_DIR/rtl8812au/Makefile"
@@ -86,10 +84,12 @@ jobs:
       - name: Apply KernelSU-Next & NetHunter Configs
         run: |
           cd workspace/aosp
-          KSU_URL="https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh"
+          # FIX: Gebruik de setup.sh van KernelSU-Next die de symlinks en Kbuild aanmaakt
+          KSU_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
           curl -LSs "$KSU_URL" | bash -s next
+          
           KSU_GIT_VER=$(git -C KernelSU-Next rev-list --count HEAD)
-          KSU_TAG=$(git -C KernelSU-Next describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          KSU_TAG=$(git -C KernelSU-Next describe --tags --abbrev=0 2>/dev/null || echo "v3.4.2")
           KB="KernelSU-Next/kernel/Kbuild"
           sed -i "s/KSU_GIT_VERSION := .*/KSU_GIT_VERSION := ${KSU_GIT_VER}/g" "$KB"
           sed -i "s/KSU_VERSION_TAG := .*/KSU_VERSION_TAG := ${KSU_TAG}/g" "$KB"
@@ -97,6 +97,7 @@ jobs:
           sed -i "1i KSU_GIT_VERSION_VALID := 1" "$KB"
           sed -i "1i KSU_GIT_TAG := ${KSU_TAG}" "$KB"
           sed -i "1i KSU_VERSION_TAG := ${KSU_TAG}" "$KB"
+          
           chmod u+w build.config.gki
           echo "DEFCONFIG=gki_defconfig" > build.config.gki
           DEF="arch/arm64/configs/gki_defconfig"
