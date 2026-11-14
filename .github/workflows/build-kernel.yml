@@ -376,13 +376,35 @@ jobs:
           
           touch dummy_fips140/WORKSPACE
 
+      - name: Patch Kleaf Workspace to use Local FIPS140
+        run: |
+          cd workspace
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("build/kernel/kleaf/workspace.bzl")
+          if not p.is_file():
+              raise SystemExit("workspace.bzl not found")
+
+          s = p.read_text()
+          # Replace the gki_prebuilt_fips140 download with local_repository
+          s = re.sub(
+              r'maybe\(\s*download_artifact_repo,\s*name\s*=\s*"gki_prebuilt_fips140",.*?\)',
+              'local_repository(name = "gki_prebuilt_fips140", path = "../../../../dummy_fips140")',
+              s,
+              flags=re.DOTALL
+          )
+          p.write_text(s)
+          print("Patched workspace.bzl successfully.")
+          PY
+
       - name: Compile Pixel 8 (shiba) Kernel via Bazel
         run: |
           cd workspace
           tools/bazel run //private/devices/google/shusky:dist -- \
             --//build/kernel/kleaf:use_prebuilt_gki=false \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
-            --override_repository=gki_prebuilt_fips140_fips140.ko="$PWD/dummy_fips140" \
             --allow_undeclared_modules \
             --notrim \
             --nokmi_symbol_list_strict_mode \
