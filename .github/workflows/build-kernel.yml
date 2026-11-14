@@ -46,6 +46,7 @@ jobs:
         run: |
           mkdir -p workspace
           cd workspace
+          # FIX: Correcte, volledige URL naar de Android Kernel Manifest repository
           MANIFEST="https://android.googlesource.com/kernel/manifest"
           BRANCH="android-gs-shusky-6.1-android16"
           repo init -u "$MANIFEST" -b "$BRANCH" --depth=1
@@ -67,6 +68,7 @@ jobs:
           rm -rf "$RTL_DIR/rtw88" "$RTL_DIR/rtl8812au"
           mkdir -p "$RTL_DIR/rtw88"
           touch "$RTL_DIR/rtw88/Kconfig"
+          # FIX: Correcte URL naar de morrownr repository
           REPO="https://github.com/morrownr/8812au-20210629.git"
           git clone "$REPO" "$RTL_DIR/rtl8812au"
           rm -rf "$RTL_DIR/rtl8812au/.git"
