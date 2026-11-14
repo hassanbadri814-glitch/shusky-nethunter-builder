@@ -301,8 +301,8 @@ jobs:
               "drivers/bluetooth/btusb.ko",
               "drivers/misc/eeprom/eeprom_93cx6.ko",
               "drivers/net/can/slcan/slcan.ko",
+              "drivers/net/usb/usbnet.ko",
               "drivers/net/usb/ax88179_178a.ko",
-              "drivers/net/usb/r8152.ko",
               "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
               "drivers/net/wireless/mediatek/mt76/mt76.ko",
               "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
@@ -365,7 +365,8 @@ jobs:
           s = p.read_text()
 
           needle = '        "module_implicit_outs": get_gki_modules_list("arm64"),\n'
-          assert s.count(needle) >= 1, "Could not find kernel_aarch64 configuration"
+          if needle not in s:
+              raise SystemExit("Could not find kernel_aarch64 configuration.")
 
           module_list = '''        "module_outs": [
               "drivers/misc/eeprom/eeprom_93cx6.ko",
@@ -518,3 +519,4 @@ jobs:
           name: twk-v${{ env.CUSTOM_KERNEL_VERSION }}-release-package
           path: workspace/bundle/*
           if-no-files-found: error
+# END OF WORKFLOW
