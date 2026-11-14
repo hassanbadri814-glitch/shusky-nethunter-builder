@@ -398,16 +398,36 @@ jobs:
           print("Updated aosp/BUILD.bazel successfully.")
           PY
 
+      - name: Neutralize FIPS140 Prebuilt Download
+        run: |
+          cd workspace
+          touch fips140_dummy.ko
+          DUMMY_PATH="$(pwd)/fips140_dummy.ko"
+          python3 - <<PY
+          from pathlib import Path
+          import re
+
+          dummy_url = f"file://{DUMMY_PATH}"
+          for p in Path(".").rglob("*"):
+              if p.is_dir() or ".git" in p.parts:
+                  continue
+              try:
+                  text = p.read_text(encoding="utf-8", errors="ignore")
+              except Exception:
+                  continue
+              
+              if "androidbuildinternal.googleapis.com" in text and "fips140" in text:
+                  print(f"Patching fips140 URL in {p}")
+                  new_text = re.sub(r'https?://[^\s<>"]+androidbuildinternal[^\s<>"]*', dummy_url, text)
+                  p.write_text(new_text, encoding="utf-8")
+          PY
+
       - name: Compile Pixel 8 Pro Kernel via Bazel
         run: |
           cd workspace
-          # FIX: Alle drie de flags om de interne FIPS140 download volledig te blokkeren
           tools/bazel run //private/devices/google/shusky:dist -- \
             --notrim \
-            --nokmi_symbol_list_strict_mode \
-            --no//private/devices/google/common:download_prebuilt_fips140 \
-            --define=download_prebuilt_gki_fips140=false \
-            --//private/devices/google/common:download_prebuilt_gki_fips140=false
+            --nokmi_symbol_list_strict_mode
 
       - name: Package Flat Release Bundle
         run: |
