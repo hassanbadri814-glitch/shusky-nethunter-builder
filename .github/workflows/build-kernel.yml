@@ -323,6 +323,8 @@ jobs:
               "drivers/usb/serial/cp210x.ko",
               "drivers/usb/serial/ftdi_sio.ko",
               "drivers/usb/serial/usbserial.ko",
+              "net/can/can.ko",
+              "net/can/can-raw.ko",
               "net/mac80211/mac80211.ko",
               "net/wireless/cfg80211.ko",
           }
@@ -392,6 +394,9 @@ jobs:
               "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
               "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
               "drivers/net/can/usb/gs_usb.ko",
+              "net/can/can.ko",
+              "net/can/can-raw.ko",
+              "drivers/net/can/slcan/slcan.ko",
           ],
           '''
 
