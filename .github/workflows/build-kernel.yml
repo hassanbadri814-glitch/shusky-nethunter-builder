@@ -398,20 +398,37 @@ jobs:
           print("Updated aosp/BUILD.bazel successfully.")
           PY
 
-      - name: Override FIPS140 Prebuilt Repository
+      - name: Neutralize FIPS140 Prebuilt Download
         run: |
           cd workspace
-          mkdir -p fips_dummy_repo
-          touch fips_dummy_repo/WORKSPACE
-          echo 'exports_files(["fips140.ko"])' > fips_dummy_repo/BUILD.bazel
-          touch fips_dummy_repo/fips140.ko
+          touch fips140_dummy.ko
+          
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import os
+          
+          dummy_path = os.path.abspath("fips140_dummy.ko")
+          dummy_url = f"file://{dummy_path}"
+          
+          for p in Path(".").rglob("*"):
+              if p.is_dir() or ".git" in p.parts:
+                  continue
+              try:
+                  text = p.read_text(encoding="utf-8", errors="ignore")
+              except Exception:
+                  continue
+              
+              if "androidbuildinternal.googleapis.com" in text and "fips140" in text:
+                  print(f"Patching fips140 URL in {p}")
+                  new_text = re.sub(r'https?://[^\s<>"]+androidbuildinternal[^\s<>"]*', dummy_url, text)
+                  p.write_text(new_text, encoding="utf-8")
+          PY
 
       - name: Compile Pixel 8 Pro Kernel via Bazel
         run: |
           cd workspace
-          # FIX: Gebruik --override_repository om de download volledig te omzeilen
           tools/bazel run //private/devices/google/shusky:dist -- \
-            --override_repository=gki_prebuilt_fips140=$(pwd)/fips_dummy_repo \
             --notrim \
             --nokmi_symbol_list_strict_mode
 
