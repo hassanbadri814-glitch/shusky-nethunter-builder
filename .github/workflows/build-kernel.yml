@@ -1,4 +1,4 @@
-name: Build Pixel 8 Pro (shusky) - NetHunter + KernelSU-Next (v1.33-rtl8187)
+name: Build Pixel 8 (shiba) - NetHunter + KernelSU-Next (v1.33-rtl8187)
 on:
   push:
     branches:
@@ -38,9 +38,9 @@ jobs:
           path: |
             ~/.cache/bazel
             workspace/out/bazel
-          key: ${{ runner.os }}-bazel-shusky-v133-rtl8187
+          key: ${{ runner.os }}-bazel-shiba-v133-rtl8187
           restore-keys: |
-            ${{ runner.os }}-bazel-shusky-
+            ${{ runner.os }}-bazel-shiba-
 
       - name: Initialize & Sync Google Kernel Source
         run: |
@@ -292,7 +292,6 @@ jobs:
           header, body, closing = match.groups()
           existing = set(re.findall(r'"([^"]+\.ko)"', body))
           
-          # Alleen de unieke, out-of-tree of specifieke drivers toevoegen
           additions = {
               "drivers/misc/eeprom/eeprom_93cx6.ko",
               "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
@@ -317,7 +316,6 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # 1. Leer common_kernels.bzl om module_outs te accepteren en dubbele entries te filteren
           p = Path("build/kernel/kleaf/common_kernels.bzl")
           s = p.read_text()
 
@@ -339,7 +337,6 @@ jobs:
           p.write_text(s)
           print("Updated common_kernels.bzl with deduplication.")
 
-          # 2. Registreer alleen onze echte extra NetHunter- & RTL8187-modules
           p = Path("aosp/BUILD.bazel")
           s = p.read_text()
 
@@ -351,7 +348,6 @@ jobs:
           filter_str = '[m for m in get_gki_modules_list("arm64") if "usb/serial/" not in m and "net/usb/" not in m and "net/can/" not in m]'
           s = s.replace(needle, f'        "module_implicit_outs": {filter_str},\n', 1)
 
-          # Alleen de unieke modules toevoegen
           module_list = '''        "module_outs": [
               "drivers/misc/eeprom/eeprom_93cx6.ko",
               "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
@@ -381,11 +377,10 @@ jobs:
           
           touch dummy_fips140/WORKSPACE
 
-      - name: Compile Pixel 8 Pro Kernel via Bazel
+      - name: Compile Pixel 8 (shiba) Kernel via Bazel
         run: |
           cd workspace
-          ./build_shusky.sh \
-            --kernel_package=@//aosp \
+          tools/bazel run //private/devices/google/shiba:dist -- \
             --//build/kernel/kleaf:use_prebuilt_gki=false \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
             --override_repository=gki_prebuilt_fips140_fips140.ko="$PWD/dummy_fips140" \
@@ -412,7 +407,7 @@ jobs:
           chmod +x AnyKernel3/tools/magiskboot
           rm -f magisk.zip
           
-          cp -L out/shusky/dist/Image.lz4 AnyKernel3/
+          cp -L out/shiba/dist/Image.lz4 AnyKernel3/
           
           FW_URL="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain"
           for fw in mt7662.bin mt7662_rom_patch.bin mt7662u.bin mt7662u_rom_patch.bin; do
@@ -427,8 +422,8 @@ jobs:
             mt76x2-common.ko mt76x2u.ko btintel.ko btrtl.ko btusb.ko \
             rfkill.ko libarc4.ko
           do
-            if [ -f "out/shusky/dist/$ko" ]; then
-              cp -L "out/shusky/dist/$ko" AnyKernel3/twk_drivers/
+            if [ -f "out/shiba/dist/$ko" ]; then
+              cp -L "out/shiba/dist/$ko" AnyKernel3/twk_drivers/
             else
               find out/ -path "*/dist/$ko" -exec cp -L {} AnyKernel3/twk_drivers/ \; -quit 2>/dev/null || true
             fi
@@ -475,8 +470,8 @@ jobs:
           (cd AnyKernel3 && zip -r9 "../bundle/twk-v${VER}-anykernel3.zip" * -x .git README.md)
           
           for img in vendor_kernel_boot.img vendor_dlkm.img system_dlkm.img; do
-            if [ -f "out/shusky/dist/$img" ]; then
-              cp -L "out/shusky/dist/$img" "bundle/twk-v${VER}-$img"
+            if [ -f "out/shiba/dist/$img" ]; then
+              cp -L "out/shiba/dist/$img" "bundle/twk-v${VER}-$img"
             else
               find out/ -type f -name "$img" -exec cp -L {} "bundle/twk-v${VER}-$img" \; -quit
             fi
