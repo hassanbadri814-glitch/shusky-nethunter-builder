@@ -38,9 +38,9 @@ jobs:
           path: |
             ~/.cache/bazel
             workspace/out/bazel
-          key: ${{ runner.os }}-bazel-shiba-v133-rtl8187
+          key: ${{ runner.os }}-bazel-shusky-v133-rtl8187
           restore-keys: |
-            ${{ runner.os }}-bazel-shiba-
+            ${{ runner.os }}-bazel-shusky-
 
       - name: Initialize & Sync Google Kernel Source
         run: |
@@ -379,7 +379,7 @@ jobs:
       - name: Compile Pixel 8 (shiba) Kernel via Bazel
         run: |
           cd workspace
-          tools/bazel run //private/devices/google/shiba:dist -- \
+          tools/bazel run //private/devices/google/shusky:dist -- \
             --//build/kernel/kleaf:use_prebuilt_gki=false \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
             --override_repository=gki_prebuilt_fips140_fips140.ko="$PWD/dummy_fips140" \
@@ -406,7 +406,7 @@ jobs:
           chmod +x AnyKernel3/tools/magiskboot
           rm -f magisk.zip
           
-          cp -L out/shiba/dist/Image.lz4 AnyKernel3/
+          cp -L out/shusky/dist/Image.lz4 AnyKernel3/
           
           FW_URL="https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain"
           for fw in mt7662.bin mt7662_rom_patch.bin mt7662u.bin mt7662u_rom_patch.bin; do
@@ -421,8 +421,8 @@ jobs:
             mt76x2-common.ko mt76x2u.ko btintel.ko btrtl.ko btusb.ko \
             rfkill.ko libarc4.ko
           do
-            if [ -f "out/shiba/dist/$ko" ]; then
-              cp -L "out/shiba/dist/$ko" AnyKernel3/twk_drivers/
+            if [ -f "out/shusky/dist/$ko" ]; then
+              cp -L "out/shusky/dist/$ko" AnyKernel3/twk_drivers/
             else
               find out/ -path "*/dist/$ko" -exec cp -L {} AnyKernel3/twk_drivers/ \; -quit 2>/dev/null || true
             fi
@@ -469,8 +469,8 @@ jobs:
           (cd AnyKernel3 && zip -r9 "../bundle/twk-v${VER}-anykernel3.zip" * -x .git README.md)
           
           for img in vendor_kernel_boot.img vendor_dlkm.img system_dlkm.img; do
-            if [ -f "out/shiba/dist/$img" ]; then
-              cp -L "out/shiba/dist/$img" "bundle/twk-v${VER}-$img"
+            if [ -f "out/shusky/dist/$img" ]; then
+              cp -L "out/shusky/dist/$img" "bundle/twk-v${VER}-$img"
             else
               find out/ -type f -name "$img" -exec cp -L {} "bundle/twk-v${VER}-$img" \; -quit
             fi
