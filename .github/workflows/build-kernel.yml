@@ -292,23 +292,11 @@ jobs:
           header, body, closing = match.groups()
           existing = set(re.findall(r'"([^"]+\.ko)"', body))
           
+          # Alleen de unieke, out-of-tree of specifieke drivers toevoegen
           additions = {
-              "drivers/bluetooth/btintel.ko",
-              "drivers/bluetooth/btrtl.ko",
-              "drivers/bluetooth/btusb.ko",
               "drivers/misc/eeprom/eeprom_93cx6.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
               "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
               "drivers/net/wireless/realtek/rtl8812au/8812au.ko",
-              "net/mac80211/mac80211.ko",
-              "net/wireless/cfg80211.ko",
-              "net/rfkill/rfkill.ko",
-              "lib/crypto/libarc4.ko",
           }
           
           to_add = additions - existing
@@ -363,23 +351,11 @@ jobs:
           filter_str = '[m for m in get_gki_modules_list("arm64") if "usb/serial/" not in m and "net/usb/" not in m and "net/can/" not in m]'
           s = s.replace(needle, f'        "module_implicit_outs": {filter_str},\n', 1)
 
+          # Alleen de unieke modules toevoegen
           module_list = '''        "module_outs": [
               "drivers/misc/eeprom/eeprom_93cx6.ko",
               "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
               "drivers/net/wireless/realtek/rtl8812au/8812au.ko",
-              "drivers/bluetooth/btintel.ko",
-              "drivers/bluetooth/btrtl.ko",
-              "drivers/bluetooth/btusb.ko",
-              "net/wireless/cfg80211.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76.ko",
-              "net/mac80211/mac80211.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
-              "net/rfkill/rfkill.ko",
-              "lib/crypto/libarc4.ko",
           ],
           '''
 
