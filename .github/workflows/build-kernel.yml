@@ -64,9 +64,11 @@ jobs:
           cd workspace/aosp
           RTL_DIR="drivers/net/wireless/realtek"
           chmod u+w "$RTL_DIR/Makefile"
-          rm -rf "$RTL_DIR/rtw88" "$RTL_DIR/rtl8812au"
-          mkdir -p "$RTL_DIR/rtw88"
-          touch "$RTL_DIR/rtw88/Kconfig"
+          
+          # FIX: Verwijder alleen rtl8812au, NIET de officiële rtw88 map!
+          rm -rf "$RTL_DIR/rtl8812au"
+          mkdir -p "$RTL_DIR/rtl8812au"
+          
           REPO="https://github.com/stoag/8812au-20210820.git"
           git clone "$REPO" "$RTL_DIR/rtl8812au"
           rm -rf "$RTL_DIR/rtl8812au/.git"
@@ -78,13 +80,14 @@ jobs:
           sed -i 's/ccflags-y += -DCONFIG_CONCURRENT_MODE/#ccflags-y += -DCONFIG_CONCURRENT_MODE/g' "$MK"
           echo 'ccflags-y += -DCONFIG_USE_USB_BUFFER_ALLOC_TX' >> "$MK"
           echo 'ccflags-y += -DCONFIG_USE_USB_BUFFER_ALLOC_RX' >> "$MK"
+          
+          # Voeg de driver toe aan de Makefile van realtek
           echo 'obj-y += rtl8812au/' >> "$RTL_DIR/Makefile"
           echo 'obj-m := $(MODULE_NAME).o' >> "$MK"
 
       - name: Apply KernelSU-Next & NetHunter Configs
         run: |
           cd workspace/aosp
-          # FIX: Gebruik de setup.sh van KernelSU-Next die de symlinks en Kbuild aanmaakt
           KSU_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
           curl -LSs "$KSU_URL" | bash -s next
           
@@ -286,44 +289,72 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
+
           build_file = Path("private/devices/google/zuma/constants.bzl")
           if not build_file.is_file():
               raise SystemExit(f"Missing expected file: {build_file}")
-          build_file.chmod(build_file.stat().st_mode | 0o200)
+
           source = build_file.read_text()
-          pattern = re.compile(r"(?ms)^(ZUMA_MODULE_OUTS\s*=\s*)(.*?)(^)")
+          
+          # Extract existing list
+          pattern = re.compile(r"(?ms)^(ZUMA_MODULE_OUTS\s*=\s*\[)(.*?)(\])")
           match = pattern.search(source)
           if not match:
-              raise SystemExit("Could not locate ZUMA_MODULE_OUTS list. No changes made.")
+              raise SystemExit("Could not locate ZUMA_MODULE_OUTS list.")
+          
           header, body, closing = match.groups()
+          existing = set(re.findall(r'"([^"]+\.ko)"', body))
+          
           additions = {
               "drivers/bluetooth/btintel.ko",
+              "drivers/bluetooth/btrtl.ko",
+              "drivers/bluetooth/btusb.ko",
               "drivers/misc/eeprom/eeprom_93cx6.ko",
+              "drivers/net/can/can.ko",
+              "drivers/net/can/dev/can-dev.ko",
+              "drivers/net/can/raw/can-raw.ko",
+              "drivers/net/can/slcan/slcan.ko",
+              "drivers/net/can/usb/gs_usb.ko",
+              "drivers/net/usb/ax88179_178a.ko",
+              "drivers/net/usb/r8152.ko",
               "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76.ko",
               "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
               "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
               "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
               "drivers/net/wireless/realtek/rtl8812au/8812au.ko",
+              "drivers/usb/class/cdc-acm.ko",
+              "drivers/usb/serial/ch341.ko",
+              "drivers/usb/serial/cp210x.ko",
+              "drivers/usb/serial/ftdi_sio.ko",
+              "drivers/usb/serial/usbserial.ko",
+              "net/mac80211/mac80211.ko",
+              "net/wireless/cfg80211.ko",
           }
-          existing = set(re.findall(r'"([^"]+\.ko)"', body))
-          combined = sorted(existing | additions)
-          comments = [line for line in body.splitlines() if line.strip().startswith("#")]
-          new_body = "\n"
-          for comment in comments:
-              new_body += comment + "\n"
-          for module in combined:
-              new_body += f' "{module}",\n'
-          replacement = header + new_body + closing
-          updated = source[:match.start()] + replacement + source[match.end():]
+          
+          to_add = additions - existing
+          
+          # Rebuild with exact 4-space indentation
+          new_body = body.rstrip()
+          for module in sorted(to_add):
+              new_body += f'\n    "{module}",'
+          new_body += "\n"
+              
+          updated = source[:match.start()] + header + new_body + closing + source[match.end():]
           build_file.write_text(updated)
+          print("Updated constants.bzl successfully.")
           PY
-          grep -n -A45 "ZUMA_MODULE_OUTS" private/devices/google/zuma/constants.bzl
+          grep -n -A50 "ZUMA_MODULE_OUTS" private/devices/google/zuma/constants.bzl
 
       - name: Enable Kleaf Module Outputs
         run: |
           cd workspace
           python3 - <<'PY'
           from pathlib import Path
+          
+          # Patch common_kernels.bzl to accept module_outs
           p = Path("build/kernel/kleaf/common_kernels.bzl")
           s = p.read_text()
           signature = " module_implicit_outs = None,\n"
@@ -332,40 +363,57 @@ jobs:
           s = s.replace(forwarding, forwarding + " module_outs = module_outs,\n")
           p.write_text(s)
           
+          # Patch aosp/BUILD.bazel to list the modules
           p = Path("aosp/BUILD.bazel")
           s = p.read_text()
           needle = ' "module_implicit_outs": get_gki_modules_list("arm64"),\n'
-          module_list = ''' "module_outs": [
-            "drivers/misc/eeprom/eeprom_93cx6.ko",
-            "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
-            "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
-            "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
-            "drivers/net/wireless/realtek/rtl8812au/8812au.ko",
-            "drivers/bluetooth/btintel.ko",
-            "drivers/usb/serial/cp210x.ko",
-            "drivers/bluetooth/btrtl.ko",
-            "drivers/usb/serial/ch341.ko",
-            "net/wireless/cfg80211.ko",
-            "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
-            "drivers/net/wireless/mediatek/mt76/mt76.ko",
-            "drivers/bluetooth/btusb.ko",
-            "net/mac80211/mac80211.ko",
-            "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
-            "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
-            "drivers/net/can/usb/gs_usb.ko",
-          ],
-          '''
+          if needle not in s:
+              raise SystemExit("Could not find kernel_aarch64 configuration.")
+              
+          modules = [
+              "drivers/bluetooth/btintel.ko",
+              "drivers/bluetooth/btrtl.ko",
+              "drivers/bluetooth/btusb.ko",
+              "drivers/misc/eeprom/eeprom_93cx6.ko",
+              "drivers/net/can/can.ko",
+              "drivers/net/can/dev/can-dev.ko",
+              "drivers/net/can/raw/can-raw.ko",
+              "drivers/net/can/slcan/slcan.ko",
+              "drivers/net/can/usb/gs_usb.ko",
+              "drivers/net/usb/ax88179_178a.ko",
+              "drivers/net/usb/r8152.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
+              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
+              "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
+              "drivers/net/wireless/realtek/rtl8812au/8812au.ko",
+              "drivers/usb/class/cdc-acm.ko",
+              "drivers/usb/serial/ch341.ko",
+              "drivers/usb/serial/cp210x.ko",
+              "drivers/usb/serial/ftdi_sio.ko",
+              "drivers/usb/serial/usbserial.ko",
+              "net/mac80211/mac80211.ko",
+              "net/wireless/cfg80211.ko",
+          ]
+          
+          module_list = '\n "module_outs": [\n'
+          for mod in modules:
+              module_list += f'    "{mod}",\n'
+          module_list += ' ],\n'
+          
           s = s.replace(needle, needle + module_list, 1)
           p.write_text(s)
+          print("Updated aosp/BUILD.bazel successfully.")
           PY
 
       - name: Compile Pixel 8 Pro Kernel via Bazel
         run: |
           cd workspace
-          ./build_shusky.sh \
-            --kernel_package=@//aosp \
-            --//build/kernel/kleaf:use_prebuilt_gki=false \
-            --no//private/devices/google/common:download_prebuilt_gki_fips140 \
+          # FIX: Gebruik de native Bazel-aanroep in plaats van het ontbrekende build_shusky.sh script
+          tools/bazel run //private/devices/google/shusky:dist -- \
             --notrim \
             --nokmi_symbol_list_strict_mode
 
