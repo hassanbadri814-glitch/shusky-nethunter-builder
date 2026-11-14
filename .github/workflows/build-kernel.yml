@@ -398,31 +398,34 @@ jobs:
           print("Updated aosp/BUILD.bazel successfully.")
           PY
 
-      - name: Neutralize FIPS140 Prebuilt Download
+      - name: Patch bazel.WORKSPACE to Remove FIPS140 Download
         run: |
           cd workspace
-          touch fips140_dummy.ko
-          
           python3 - <<'PY'
           from pathlib import Path
           import re
-          import os
+
+          workspace_file = Path("bazel.WORKSPACE")
+          if not workspace_file.is_file():
+              print("bazel.WORKSPACE not found, skipping.")
+              raise SystemExit(0)
+
+          source = workspace_file.read_text()
           
-          dummy_path = os.path.abspath("fips140_dummy.ko")
-          dummy_url = f"file://{dummy_path}"
+          # Remove the download_artifacts_repo block for gki_prebuilt_fips140
+          pattern = re.compile(
+              r'download_artifacts_repo\(\s*'
+              r'name\s*=\s*"gki_prebuilt_fips140".*?\)\s*',
+              re.DOTALL
+          )
           
-          for p in Path(".").rglob("*"):
-              if p.is_dir() or ".git" in p.parts:
-                  continue
-              try:
-                  text = p.read_text(encoding="utf-8", errors="ignore")
-              except Exception:
-                  continue
-              
-              if "androidbuildinternal.googleapis.com" in text and "fips140" in text:
-                  print(f"Patching fips140 URL in {p}")
-                  new_text = re.sub(r'https?://[^\s<>"]+androidbuildinternal[^\s<>"]*', dummy_url, text)
-                  p.write_text(new_text, encoding="utf-8")
+          new_source = pattern.sub('', source)
+          
+          if new_source == source:
+              print("No change made to bazel.WORKSPACE.")
+          else:
+              workspace_file.write_text(new_source)
+              print("Removed gki_prebuilt_fips140 download from bazel.WORKSPACE.")
           PY
 
       - name: Compile Pixel 8 Pro Kernel via Bazel
