@@ -344,7 +344,6 @@ jobs:
           if needle not in s:
               raise SystemExit("Could not find kernel_aarch64 configuration.")
 
-          # FILTER: Verwijder alle USB-Serial en USB-Netwerk modules uit de standaard GKI lijst
           filter_str = '[m for m in get_gki_modules_list("arm64") if "usb/serial/" not in m and "net/usb/" not in m and "net/can/" not in m]'
           s = s.replace(needle, f'        "module_implicit_outs": {filter_str},\n', 1)
 
