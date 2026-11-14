@@ -398,12 +398,20 @@ jobs:
           print("Updated aosp/BUILD.bazel successfully.")
           PY
 
+      - name: Override FIPS140 Prebuilt Repository
+        run: |
+          cd workspace
+          mkdir -p fips_dummy_repo
+          touch fips_dummy_repo/WORKSPACE
+          echo 'exports_files(["fips140.ko"])' > fips_dummy_repo/BUILD.bazel
+          touch fips_dummy_repo/fips140.ko
+
       - name: Compile Pixel 8 Pro Kernel via Bazel
         run: |
           cd workspace
-          # FIX: Officiële configuratievlag om de FIPS140-download te blokkeren
+          # FIX: Gebruik --override_repository om de download volledig te omzeilen
           tools/bazel run //private/devices/google/shusky:dist -- \
-            --config=no_download_gki_fips140 \
+            --override_repository=gki_prebuilt_fips140=$(pwd)/fips_dummy_repo \
             --notrim \
             --nokmi_symbol_list_strict_mode
 
