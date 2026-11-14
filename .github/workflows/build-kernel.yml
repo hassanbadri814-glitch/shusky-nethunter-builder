@@ -401,18 +401,29 @@ jobs:
       - name: Create Local FIPS140 Dummy Repository
         run: |
           cd workspace
-          mkdir -p dummy_fips140_repo/file
-          touch dummy_fips140_repo/WORKSPACE
-          touch dummy_fips140_repo/file/fips140.ko
-          echo 'exports_files(["fips140.ko"])' > dummy_fips140_repo/file/BUILD.bazel
+          mkdir -p dummy_fips140/file
+          touch dummy_fips140/file/fips140.ko
+          
+          cat << 'EOF' > dummy_fips140/BUILD.bazel
+          package(default_visibility = ["//visibility:public"])
+          exports_files(["file/fips140.ko"])
+          filegroup(
+              name = "file",
+              srcs = ["file/fips140.ko"],
+          )
+          EOF
+          
+          touch dummy_fips140/WORKSPACE
 
       - name: Compile Pixel 8 Pro Kernel via Bazel
         run: |
           cd workspace
-          # FIX: Gebruik --override_repository om de download volledig te omzeilen
-          tools/bazel run //private/devices/google/shusky:dist -- \
-            --override_repository=gki_prebuilt_fips140_fips140.ko=$(pwd)/dummy_fips140_repo \
-            --override_repository=gki_prebuilt_fips140=$(pwd)/dummy_fips140_repo \
+          # FIX: Gebruik exact de build_shusky.sh aanroep met de override_repository vlag
+          ./build_shusky.sh \
+            --kernel_package=@//aosp \
+            --//build/kernel/kleaf:use_prebuilt_gki=false \
+            --no//private/devices/google/common:download_prebuilt_gki_fips140 \
+            --override_repository=gki_prebuilt_fips140_fips140.ko="$PWD/dummy_fips140" \
             --notrim \
             --nokmi_symbol_list_strict_mode
 
