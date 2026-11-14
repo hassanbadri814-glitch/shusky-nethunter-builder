@@ -166,12 +166,6 @@ jobs:
             echo 'CONFIG_MT76x2_COMMON=m'
             echo 'CONFIG_MT76x2U=m'
             echo 'CONFIG_BT_HCIBTUSB=m'
-            echo 'CONFIG_USB_ACM=m'
-            echo 'CONFIG_USB_SERIAL=m'
-            echo 'CONFIG_USB_SERIAL_CH341=m'
-            echo 'CONFIG_USB_SERIAL_CP210X=m'
-            echo 'CONFIG_USB_USBNET=m'
-            echo 'CONFIG_USB_NET_AX88179_178A=m'
           } >> "$DEF"
 
       - name: Authorize NetHunter Symbols in GKI
@@ -300,9 +294,6 @@ jobs:
               "drivers/bluetooth/btrtl.ko",
               "drivers/bluetooth/btusb.ko",
               "drivers/misc/eeprom/eeprom_93cx6.ko",
-              "drivers/net/can/slcan/slcan.ko",
-              "drivers/net/usb/usbnet.ko",
-              "drivers/net/usb/ax88179_178a.ko",
               "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
               "drivers/net/wireless/mediatek/mt76/mt76.ko",
               "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
@@ -311,11 +302,6 @@ jobs:
               "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
               "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
               "drivers/net/wireless/realtek/rtl8812au/8812au.ko",
-              "drivers/usb/class/cdc-acm.ko",
-              "drivers/usb/serial/ch341.ko",
-              "drivers/usb/serial/cp210x.ko",
-              "drivers/usb/serial/ftdi_sio.ko",
-              "drivers/usb/serial/usbserial.ko",
               "net/mac80211/mac80211.ko",
               "net/wireless/cfg80211.ko",
           }
@@ -368,6 +354,10 @@ jobs:
           if needle not in s:
               raise SystemExit("Could not find kernel_aarch64 configuration.")
 
+          # FILTER: Verwijder alle USB-Serial, USB-Netwerk en CAN modules uit de standaard GKI lijst
+          filter_string = '[m for m in get_gki_modules_list("arm64") if not any(x in m for x in ["usb/serial/", "net/usb/", "net/can/", "cdc-acm", "ch341", "cp210x", "ftdi_sio", "ax88179", "r8152"])]'
+          s = s.replace(needle, f'        "module_implicit_outs": {filter_string},\n', 1)
+
           module_list = '''        "module_outs": [
               "drivers/misc/eeprom/eeprom_93cx6.ko",
               "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
@@ -375,24 +365,20 @@ jobs:
               "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
               "drivers/net/wireless/realtek/rtl8812au/8812au.ko",
               "drivers/bluetooth/btintel.ko",
-              "drivers/usb/serial/cp210x.ko",
               "drivers/bluetooth/btrtl.ko",
-              "drivers/usb/serial/ch341.ko",
-              "drivers/net/usb/usbnet.ko",
+              "drivers/bluetooth/btusb.ko",
               "net/wireless/cfg80211.ko",
               "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
               "drivers/net/wireless/mediatek/mt76/mt76.ko",
-              "drivers/bluetooth/btusb.ko",
               "net/mac80211/mac80211.ko",
               "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
               "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
-              "drivers/net/can/slcan/slcan.ko",
           ],
           '''
 
-          s = s.replace(needle, needle + module_list, 1)
+          s = s.replace(f'        "module_implicit_outs": {filter_string},\n', f'        "module_implicit_outs": {filter_string},\n' + module_list, 1)
           p.write_text(s)
-          print("Registered additional module outputs successfully.")
+          print("Registered additional module outputs and applied filter successfully.")
           PY
 
       - name: Create Local FIPS140 Dummy Repository
@@ -454,9 +440,7 @@ jobs:
           for ko in \
             eeprom_93cx6.ko rtl8187.ko \
             8812au.ko mt76.ko mt76-usb.ko mt76x02-lib.ko mt76x02-usb.ko \
-            mt76x2-common.ko mt76x2u.ko btintel.ko btrtl.ko btusb.ko \
-            cdc-acm.ko usbserial.ko ch341.ko cp210x.ko ftdi_sio.ko \
-            slcan.ko usbnet.ko ax88179_178a.ko
+            mt76x2-common.ko mt76x2u.ko btintel.ko btrtl.ko btusb.ko
           do
             if [ -f "out/shusky/dist/$ko" ]; then
               cp -L "out/shusky/dist/$ko" AnyKernel3/twk_drivers/
@@ -495,7 +479,7 @@ jobs:
             echo 'echo "cp -f \$MOD_DIR/twk_firmware/*.bin /dev/twk_firmware/ 2>/dev/null || true" >> "$SV"'
             echo 'echo "cp -f \$MOD_DIR/twk_modules/*.ko /dev/twk_modules/ 2>/dev/null || true" >> "$SV"'
             echo 'echo "echo -n /dev/twk_firmware > /sys/module/firmware_class/parameters/path" >> "$SV"'
-            echo 'for m in eeprom_93cx6.ko rtl8187.ko btintel.ko btrtl.ko btusb.ko mt76.ko mt76-usb.ko mt76x02-lib.ko mt76x02-usb.ko mt76x2-common.ko mt76x2u.ko cdc-acm.ko usbserial.ko ch341.ko cp210x.ko ftdi_sio.ko slcan.ko usbnet.ko ax88179_178a.ko; do'
+            echo 'for m in eeprom_93cx6.ko rtl8187.ko btintel.ko btrtl.ko btusb.ko mt76.ko mt76-usb.ko mt76x02-lib.ko mt76x02-usb.ko mt76x2-common.ko mt76x2u.ko; do'
             echo ' echo "[ -f /dev/twk_modules/$m ] && insmod /dev/twk_modules/$m >> $LOG 2>&1 || true" >> "$SV"'
             echo 'done'
             echo 'echo "[ -f /dev/twk_modules/8812au.ko ] && insmod /dev/twk_modules/8812au.ko rtw_drv_log_level=6 rtw_power_mgnt=0 rtw_switch_usb_mode=0 >> $LOG 2>&1 || true" >> "$SV"'
