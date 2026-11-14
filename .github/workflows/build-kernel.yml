@@ -359,50 +359,35 @@ jobs:
           print("Registered additional module outputs and applied filter successfully.")
           PY
 
-      - name: Create Local FIPS140 Dummy Repository
-        run: |
-          cd workspace
-          mkdir -p dummy_fips140/file
-          touch dummy_fips140/file/fips140.ko
-          
-          cat << 'EOF' > dummy_fips140/BUILD.bazel
-          package(default_visibility = ["//visibility:public"])
-          exports_files(["file/fips140.ko"])
-          filegroup(
-              name = "file",
-              srcs = ["file/fips140.ko"],
-          )
-          EOF
-          
-          touch dummy_fips140/WORKSPACE
-
-      - name: Patch Kleaf Workspace to use Local FIPS140
+      - name: Bypass FIPS140 404 Download in Kleaf
         run: |
           cd workspace
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
-          p = Path("build/kernel/kleaf/workspace.bzl")
-          if not p.is_file():
-              raise SystemExit("workspace.bzl not found")
+          p = Path("build/kernel/kleaf/download_repo.bzl")
+          p.chmod(p.stat().st_mode | 0o200)
+          lines = p.read_text().splitlines()
 
-          s = p.read_text()
-          # Replace the gki_prebuilt_fips140 download with local_repository
-          s = re.sub(
-              r'maybe\(\s*download_artifact_repo,\s*name\s*=\s*"gki_prebuilt_fips140",.*?\)',
-              'local_repository(name = "gki_prebuilt_fips140", path = "../../../../dummy_fips140")',
-              s,
-              flags=re.DOTALL
-          )
-          p.write_text(s)
-          print("Patched workspace.bzl successfully.")
+          out = []
+          for line in lines:
+              out.append(line)
+              if line.startswith("def _download_artifact_repo_impl("):
+                  out.append('    if "fips140" in repository_ctx.name:')
+                  out.append('        repository_ctx.file("file/fips140.ko", "")')
+                  out.append('        repository_ctx.file("file/BUILD.bazel", "exports_files([\\"fips140.ko\\"])\\nfilegroup(name = \\"file\\", srcs = [\\"fips140.ko\\"], visibility = [\\"//visibility:public\\"])\\n")')
+                  out.append('        repository_ctx.file("BUILD.bazel", "exports_files([\\"file/fips140.ko\\"])\\n")')
+                  out.append('        return')
+
+          p.write_text("\n".join(out) + "\n")
+          print("Patched _download_artifact_repo_impl successfully!")
           PY
 
       - name: Compile Pixel 8 (shiba) Kernel via Bazel
         run: |
           cd workspace
-          tools/bazel run //private/devices/google/shusky:dist -- \
+          ./build_shusky.sh \
+            --kernel_package=@//aosp \
             --//build/kernel/kleaf:use_prebuilt_gki=false \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
             --allow_undeclared_modules \
