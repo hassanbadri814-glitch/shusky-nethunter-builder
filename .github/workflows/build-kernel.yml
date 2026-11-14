@@ -398,44 +398,21 @@ jobs:
           print("Updated aosp/BUILD.bazel successfully.")
           PY
 
-      - name: Patch bazel.WORKSPACE to Use Local FIPS140 Dummy
+      - name: Create Local FIPS140 Dummy Repository
         run: |
           cd workspace
-          mkdir -p fips_dummy_repo
-          touch fips_dummy_repo/fips140.ko
-          echo 'exports_files(["fips140.ko"])' > fips_dummy_repo/BUILD.bazel
-          
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          
-          workspace_file = Path("bazel.WORKSPACE")
-          if not workspace_file.is_file():
-              print("bazel.WORKSPACE not found, skipping.")
-              raise SystemExit(0)
-          
-          source = workspace_file.read_text()
-          
-          # Replace download_artifacts_repo for gki_prebuilt_fips140 with local_repository
-          pattern = re.compile(
-              r'download_artifacts_repo\(\s*name\s*=\s*"gki_prebuilt_fips140".*?\)\s*',
-              re.DOTALL
-          )
-          replacement = 'local_repository(name = "gki_prebuilt_fips140", path = "fips_dummy_repo")\n'
-          
-          new_source = pattern.sub(replacement, source)
-          
-          if new_source == source:
-              print("No change made to bazel.WORKSPACE (pattern not found).")
-          else:
-              workspace_file.write_text(new_source)
-              print("Replaced download_artifacts_repo with local_repository in bazel.WORKSPACE.")
-          PY
+          mkdir -p dummy_fips140_repo/file
+          touch dummy_fips140_repo/WORKSPACE
+          touch dummy_fips140_repo/file/fips140.ko
+          echo 'exports_files(["fips140.ko"])' > dummy_fips140_repo/file/BUILD.bazel
 
       - name: Compile Pixel 8 Pro Kernel via Bazel
         run: |
           cd workspace
+          # FIX: Gebruik --override_repository om de download volledig te omzeilen
           tools/bazel run //private/devices/google/shusky:dist -- \
+            --override_repository=gki_prebuilt_fips140_fips140.ko=$(pwd)/dummy_fips140_repo \
+            --override_repository=gki_prebuilt_fips140=$(pwd)/dummy_fips140_repo \
             --notrim \
             --nokmi_symbol_list_strict_mode
 
