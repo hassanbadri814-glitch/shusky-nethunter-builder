@@ -410,7 +410,7 @@ jobs:
             --//build/kernel/kleaf:use_prebuilt_gki=false \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
             --override_repository=gki_prebuilt_fips140_fips140.ko="$PWD/dummy_fips140" \
-            --//build/kernel/kleaf:check_declared_outputs=false \
+            --allow_undeclared_modules \
             --notrim \
             --nokmi_symbol_list_strict_mode \
             --verbose_failures
