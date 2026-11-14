@@ -64,11 +64,8 @@ jobs:
           cd workspace/aosp
           RTL_DIR="drivers/net/wireless/realtek"
           chmod u+w "$RTL_DIR/Makefile"
-          
-          # FIX: Verwijder alleen rtl8812au, NIET de officiële rtw88 map!
           rm -rf "$RTL_DIR/rtl8812au"
           mkdir -p "$RTL_DIR/rtl8812au"
-          
           REPO="https://github.com/stoag/8812au-20210820.git"
           git clone "$REPO" "$RTL_DIR/rtl8812au"
           rm -rf "$RTL_DIR/rtl8812au/.git"
@@ -80,8 +77,6 @@ jobs:
           sed -i 's/ccflags-y += -DCONFIG_CONCURRENT_MODE/#ccflags-y += -DCONFIG_CONCURRENT_MODE/g' "$MK"
           echo 'ccflags-y += -DCONFIG_USE_USB_BUFFER_ALLOC_TX' >> "$MK"
           echo 'ccflags-y += -DCONFIG_USE_USB_BUFFER_ALLOC_RX' >> "$MK"
-          
-          # Voeg de driver toe aan de Makefile van realtek
           echo 'obj-y += rtl8812au/' >> "$RTL_DIR/Makefile"
           echo 'obj-m := $(MODULE_NAME).o' >> "$MK"
 
@@ -295,8 +290,6 @@ jobs:
               raise SystemExit(f"Missing expected file: {build_file}")
 
           source = build_file.read_text()
-          
-          # Extract existing list
           pattern = re.compile(r"(?ms)^(ZUMA_MODULE_OUTS\s*=\s*\[)(.*?)(\])")
           match = pattern.search(source)
           if not match:
@@ -335,8 +328,6 @@ jobs:
           }
           
           to_add = additions - existing
-          
-          # Rebuild with exact 4-space indentation
           new_body = body.rstrip()
           for module in sorted(to_add):
               new_body += f'\n    "{module}",'
@@ -354,7 +345,6 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           
-          # Patch common_kernels.bzl to accept module_outs
           p = Path("build/kernel/kleaf/common_kernels.bzl")
           s = p.read_text()
           signature = " module_implicit_outs = None,\n"
@@ -363,7 +353,6 @@ jobs:
           s = s.replace(forwarding, forwarding + " module_outs = module_outs,\n")
           p.write_text(s)
           
-          # Patch aosp/BUILD.bazel to list the modules
           p = Path("aosp/BUILD.bazel")
           s = p.read_text()
           needle = ' "module_implicit_outs": get_gki_modules_list("arm64"),\n'
@@ -412,10 +401,13 @@ jobs:
       - name: Compile Pixel 8 Pro Kernel via Bazel
         run: |
           cd workspace
-          # FIX: Gebruik de native Bazel-aanroep in plaats van het ontbrekende build_shusky.sh script
+          # FIX: Alle drie de flags om de interne FIPS140 download volledig te blokkeren
           tools/bazel run //private/devices/google/shusky:dist -- \
             --notrim \
-            --nokmi_symbol_list_strict_mode
+            --nokmi_symbol_list_strict_mode \
+            --no//private/devices/google/common:download_prebuilt_fips140 \
+            --define=download_prebuilt_gki_fips140=false \
+            --//private/devices/google/common:download_prebuilt_gki_fips140=false
 
       - name: Package Flat Release Bundle
         run: |
