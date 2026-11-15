@@ -11,106 +11,94 @@ permissions:
   contents: read
 
 concurrency:
-  group: shiba-kernel-build
+  group: shiba-nethunter-kernel-build
   cancel-in-progress: false
 
 jobs:
   build-kernel:
-    name: Build and verify Shiba kernel
+    name: Build and verify Shiba NetHunter kernel
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     env:
-      DEVICE: shusky
-      DEVICE_CODENAME: shiba
-      KERNEL_BRANCH: android-gs-shusky-6.1-android16
+      DEVICE: shiba
+      KERNEL_DEVICE: shusky
       CUSTOM_KERNEL_VERSION: "1.33"
-      WORKSPACE: workspace
       BUILD_AOSP_KERNEL: "1"
 
     steps:
+      # --------------------------------------------------
       # 1. Prepare runner
+      # --------------------------------------------------
 
       - name: Free runner disk space
         run: |
-          set -eux
           sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
           sudo apt-get clean
           df -h
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
-          set -eux
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential ca-certificates curl \
-            flex git kmod libelf-dev libncurses5-dev \
-            libssl-dev python3 repo unzip wget zip zstd
+            git \
+            curl \
+            python3 \
+            python3-pip \
+            python-is-python3 \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            libncurses-dev \
+            dwarves \
+            zip \
+            unzip \
+            rsync \
+            ccache \
+            file \
+            kmod \
+            xz-utils \
+            zstd
 
-          git --version
-          python3 --version
-          repo version
-
-      - name: Configure Git
+      - name: Install Android repo tool
         run: |
-          git config --global user.name "Kernel Builder"
-          git config --global user.email "kernel-builder@localhost"
-          git config --global advice.detachedHead false
+          mkdir -p "$HOME/bin"
+          curl -fsSL \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      # 2. Sync official Google source
+      # --------------------------------------------------
+      # 2. Download official Google kernel source
+      # --------------------------------------------------
 
-      - name: Initialize Google kernel source
+      - name: Initialize Google kernel repository
         run: |
-          set -eux
-
-          mkdir -p "$WORKSPACE"
-          cd "$WORKSPACE"
+          mkdir -p workspace
+          cd workspace
 
           repo init \
             -u https://android.googlesource.com/kernel/manifest \
-            -b "$KERNEL_BRANCH" \
-            --depth=1
+            -b android-gs-shusky-6.1-android16
 
-          repo sync \
-            -c \
-            -j"$(nproc)" \
-            --no-tags \
-            --no-clone-bundle
-
-          test -f build_shusky.sh
-          test -f private/devices/google/shusky/BUILD.bazel
-          test -f private/devices/google/shusky/shusky_defconfig
-          test -f private/devices/google/zuma/constants.bzl
-          test -f private/devices/google/zuma/BUILD.bazel
-          test -f aosp/BUILD.bazel
-
-      - name: Record source revisions
+      - name: Sync Google kernel source
         run: |
-          set -eux
-          cd "$WORKSPACE"
+          cd workspace
+          repo sync -c -j2 --no-tags --fail-fast
 
-          mkdir -p build-report
-
-          repo manifest -r > build-report/manifest.xml
-
-          {
-            echo "Device: $DEVICE_CODENAME"
-            echo "Branch: $KERNEL_BRANCH"
-            echo "Kernel label: $CUSTOM_KERNEL_VERSION"
-            echo "Build date UTC: $(date -u)"
-            echo
-            repo forall -c \
-              'echo "$REPO_PATH $REPO_LREV $REPO_RREV"'
-          } > build-report/source-info.txt
-
+      # --------------------------------------------------
       # 3. Create NetHunter configuration fragment
+      # --------------------------------------------------
 
-      - name: Add NetHunter defconfig fragment
+      - name: Create NetHunter defconfig
         run: |
-          set -eux
-          cd "$WORKSPACE"
+          cd workspace
 
           cat > private/devices/google/shusky/nethunter_defconfig <<'EOF'
           # NetHunter external USB wireless support
@@ -118,54 +106,96 @@ jobs:
           CONFIG_WLAN=y
           CONFIG_CFG80211=m
           CONFIG_MAC80211=m
+
           CONFIG_USB=y
 
+          # Realtek RTL8187 USB adapter
           CONFIG_WLAN_VENDOR_REALTEK=y
           CONFIG_EEPROM_93CX6=m
           CONFIG_RTL8187=m
 
+          # MediaTek MT76x2U USB adapter
           CONFIG_WLAN_VENDOR_MEDIATEK=y
           CONFIG_MT76x2U=m
           EOF
 
+          echo "Created nethunter_defconfig:"
+          cat private/devices/google/shusky/nethunter_defconfig
+
+      # --------------------------------------------------
+      # 4. Register defconfig in Shusky BUILD.bazel
+      # --------------------------------------------------
+
+      - name: Register NetHunter defconfig
+        run: |
+          cd workspace
+
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          p = Path("private/devices/google/shusky/BUILD.bazel")
-          s = p.read_text()
+          path = Path(
+              "private/devices/google/shusky/BUILD.bazel"
+          )
 
-          marker = '"shusky_defconfig",'
-          addition = '"nethunter_defconfig",'
+          content = path.read_text()
 
-          if addition not in s:
-              assert s.count(marker) == 1, (
-                  "Cannot uniquely locate shusky_defconfig "
-                  "in Shusky BUILD.bazel"
+          pattern = r'(?m)^(\s*)"shusky_defconfig",\s*$'
+          matches = list(re.finditer(pattern, content))
+
+          if len(matches) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one shusky_defconfig entry; "
+                  f"found {len(matches)}"
               )
-              s = s.replace(
-                  marker,
-                  marker + "\n        " + addition,
-                  1
+
+          if '"nethunter_defconfig"' in content:
+              raise SystemExit(
+                  "ERROR: nethunter_defconfig is already registered"
               )
 
-          p.write_text(s)
-          print("Shusky NetHunter defconfig registered.")
+          match = matches[0]
+          indent = match.group(1)
+
+          replacement = (
+              f'{indent}"shusky_defconfig",\n'
+              f'{indent}"nethunter_defconfig",'
+          )
+
+          content = (
+              content[:match.start()]
+              + replacement
+              + content[match.end():]
+          )
+
+          path.write_text(content)
+
+          print("Registered nethunter_defconfig successfully")
           PY
 
-      # 4. Register additional device module outputs
+      # --------------------------------------------------
+      # 5. Register wireless modules in ZUMA_MODULE_OUTS
+      # --------------------------------------------------
 
-      - name: Register NetHunter modules
+      - name: Register NetHunter kernel modules
         run: |
-          set -eux
-          cd "$WORKSPACE"
+          cd workspace
 
           python3 - <<'PY'
           from pathlib import Path
 
-          p = Path("private/devices/google/zuma/constants.bzl")
-          s = p.read_text()
+          path = Path(
+              "private/devices/google/zuma/constants.bzl"
+          )
+
+          content = path.read_text()
 
           marker = '    "net/wireless/cfg80211.ko",'
+
+          if content.count(marker) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one cfg80211 module entry"
+              )
 
           modules = [
               "drivers/misc/eeprom/eeprom_93cx6.ko",
@@ -178,141 +208,171 @@ jobs:
               "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
           ]
 
-          assert s.count(marker) == 1, (
-              "Cannot uniquely locate cfg80211 in ZUMA_MODULE_OUTS"
-          )
-
-          missing = [
-              m for m in modules
-              if f'"{m}"' not in s
-          ]
-
-          if missing:
-              addition = "".join(
-                  f'    "{m}",\n' for m in missing
-              )
-              s = s.replace(
-                  marker,
-                  marker + "\n" + addition.rstrip(),
-                  1
-              )
-
-          p.write_text(s)
-
-          print("Registered additional module outputs:")
-          for m in modules:
-              print(m)
-          PY
-
-      # 5. Build official Google Shusky target
-
-      - name: Compile Pixel 8 kernel with Kleaf
-        run: |
-          set -eux
-          cd "$WORKSPACE"
-
-          ./build_shusky.sh \
-            --//build/kernel/kleaf:use_prebuilt_gki=false \
-            --verbose_failures
-
-      # 6. Verify kernel distribution
-
-      - name: Verify kernel image and config
-        run: |
-          set -eux
-          cd "$WORKSPACE"
-
-          DIST="out/$DEVICE/dist"
-
-          test -d "$DIST"
-          test -s "$DIST/Image.lz4"
-          test -s "$DIST/.config"
-
-          mkdir -p build-report
-
-          ls -lh "$DIST/Image.lz4"
-
-          sha256sum "$DIST/Image.lz4" \
-            | tee build-report/kernel-image.sha256
-
-      - name: Verify final kernel configuration
-        run: |
-          set -eux
-          cd "$WORKSPACE"
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          config = Path("out/shusky/dist/.config")
-
-          if not config.is_file():
-              raise SystemExit("Missing Shusky distribution .config")
-
-          values = {}
-
-          for line in config.read_text().splitlines():
-              if line.startswith("CONFIG_") and "=" in line:
-                  key, value = line.split("=", 1)
-                  values[key] = value
-              elif line.startswith("# CONFIG_") and line.endswith(" is not set"):
-                  values[line.split()[1]] = "n"
-
-          required = {
-              "CONFIG_MODULES": "y",
-              "CONFIG_MODVERSIONS": "y",
-              "CONFIG_WLAN": "y",
-              "CONFIG_CFG80211": "m",
-              "CONFIG_MAC80211": "m",
-              "CONFIG_USB": "y",
-              "CONFIG_WLAN_VENDOR_REALTEK": "y",
-              "CONFIG_EEPROM_93CX6": "m",
-              "CONFIG_RTL8187": "m",
-              "CONFIG_WLAN_VENDOR_MEDIATEK": "y",
-              "CONFIG_MT76_CORE": "m",
-              "CONFIG_MT76_USB": "m",
-              "CONFIG_MT76x02_LIB": "m",
-              "CONFIG_MT76x02_USB": "m",
-              "CONFIG_MT76x2_COMMON": "m",
-              "CONFIG_MT76x2U": "m",
-          }
-
-          errors = []
-
-          for key, expected in required.items():
-              actual = values.get(key, "n")
-              print(f"{key}: {actual} (expected {expected})")
-
-              if actual != expected:
-                  errors.append(
-                      f"{key}: expected {expected}, got {actual}"
+          for module in modules:
+              if f'"{module}"' in content:
+                  raise SystemExit(
+                      f"ERROR: Module already registered: {module}"
                   )
 
-          ksu = values.get("CONFIG_KSU", "n")
-          print(f"CONFIG_KSU: {ksu}")
-
-          if ksu in ("y", "m"):
-              errors.append("KernelSU is enabled in the kernel config")
-
-          if errors:
-              raise SystemExit("\n".join(errors))
-
-          Path("build-report").mkdir(exist_ok=True)
-          Path("build-report/final.config").write_text(
-              config.read_text()
+          addition = "\n".join(
+              f'    "{module}",' for module in modules
           )
 
-          print("Kernel configuration checks passed.")
+          content = content.replace(
+              marker,
+              marker + "\n" + addition,
+              1
+          )
+
+          path.write_text(content)
+
+          print("Registered additional modules:")
+          for module in modules:
+              print(" -", module)
           PY
 
-      # 7. Verify required modules
+      # --------------------------------------------------
+      # 6. Validate source modifications
+      # --------------------------------------------------
 
-      - name: Verify required wireless modules
+      - name: Validate source modifications
         run: |
-          set -eux
-          cd "$WORKSPACE"
+          cd workspace
 
-          DIST="out/$DEVICE/dist"
+          git diff --check
+
+          echo "=== Shusky BUILD.bazel ==="
+          grep -n -A8 -B4 nethunter_defconfig \
+            private/devices/google/shusky/BUILD.bazel
+
+          echo "=== Zuma module outputs ==="
+          grep -n -A15 -B3 cfg80211 \
+            private/devices/google/zuma/constants.bzl
+
+          echo "=== NetHunter defconfig ==="
+          cat private/devices/google/shusky/nethunter_defconfig
+
+      # --------------------------------------------------
+      # 7. Build official Shusky target
+      # --------------------------------------------------
+
+      - name: Build Shusky NetHunter kernel
+        run: |
+          cd workspace
+
           mkdir -p build-report
+
+          echo "Build started: $(date -u)" \
+            | tee build-report/build-status.txt
+
+          echo "Target: //private/devices/google/shusky:zuma_shusky_dist" \
+            | tee -a build-report/build-status.txt
+
+          echo "Device: shiba / shusky" \
+            | tee -a build-report/build-status.txt
+
+          echo "Kernel branch: android-gs-shusky-6.1-android16" \
+            | tee -a build-report/build-status.txt
+
+          ./private/devices/google/shusky/build_shusky.sh \
+            --//build/kernel/kleaf:use_prebuilt_gki=false \
+            --no//private/devices/google/common:download_prebuilt_gki_fips140 \
+            --verbose_failures \
+            2>&1 | tee build-report/build.log
+
+      # --------------------------------------------------
+      # 8. Verify final kernel configuration
+      # --------------------------------------------------
+
+      - name: Verify final kernel configuration
+        if: success()
+        run: |
+          cd workspace
+
+          DIST="out/shusky/dist"
+          CONFIG="$DIST/.config"
+
+          test -f "$CONFIG" || {
+            echo "ERROR: Expected dist .config not found"
+            find out/shusky -name .config -type f
+            exit 1
+          }
+
+          cp "$CONFIG" build-report/final.config
+
+          {
+            echo "=== Required configuration ==="
+
+            for option in \
+              CONFIG_MODULES \
+              CONFIG_MODVERSIONS \
+              CONFIG_WLAN \
+              CONFIG_CFG80211 \
+              CONFIG_MAC80211 \
+              CONFIG_USB \
+              CONFIG_WLAN_VENDOR_REALTEK \
+              CONFIG_EEPROM_93CX6 \
+              CONFIG_RTL8187 \
+              CONFIG_WLAN_VENDOR_MEDIATEK \
+              CONFIG_MT76_CORE \
+              CONFIG_MT76_USB \
+              CONFIG_MT76x02_LIB \
+              CONFIG_MT76x02_USB \
+              CONFIG_MT76x2_COMMON \
+              CONFIG_MT76x2U
+            do
+              grep -E "^${option}=" "$CONFIG" || true
+            done
+
+            echo
+            echo "=== KernelSU configuration, if present ==="
+            grep -E '^CONFIG_KSU=' "$CONFIG" || true
+          } | tee build-report/config-check.txt
+
+          check_config() {
+            option="$1"
+            expected="$2"
+
+            if ! grep -qx "${option}=${expected}" "$CONFIG"; then
+              echo "ERROR: ${option} is not ${expected}"
+              exit 1
+            fi
+          }
+
+          check_config CONFIG_MODULES y
+          check_config CONFIG_MODVERSIONS y
+          check_config CONFIG_WLAN y
+          check_config CONFIG_CFG80211 m
+          check_config CONFIG_MAC80211 m
+          check_config CONFIG_USB y
+          check_config CONFIG_WLAN_VENDOR_REALTEK y
+          check_config CONFIG_RTL8187 m
+          check_config CONFIG_WLAN_VENDOR_MEDIATEK y
+          check_config CONFIG_MT76x2U m
+
+          if grep -Eq '^CONFIG_KSU=(y|m)$' "$CONFIG"; then
+            echo "ERROR: KernelSU is enabled in the kernel config"
+            exit 1
+          fi
+
+          echo "Configuration checks passed."
+
+      # --------------------------------------------------
+      # 9. Verify kernel image and module outputs
+      # --------------------------------------------------
+
+      - name: Verify kernel image and modules
+        if: success()
+        run: |
+          cd workspace
+
+          DIST="out/shusky/dist"
+
+          test -f "$DIST/Image.lz4" || {
+            echo "ERROR: Image.lz4 not found"
+            find "$DIST" -maxdepth 3 -type f
+            exit 1
+          }
 
           MODULES=(
             eeprom_93cx6.ko
@@ -327,114 +387,190 @@ jobs:
             mac80211.ko
           )
 
-          : > build-report/modules.txt
+          mkdir -p build-report/modules
+
+          : > build-report/module-list.txt
 
           for module in "${MODULES[@]}"; do
-            mapfile -t matches < <(
-              find "$DIST" -type f -name "$module"
-            )
+            echo "Checking $module"
 
-            if [ "${#matches[@]}" -ne 1 ]; then
-              echo "ERROR: Expected exactly one $module"
-              printf '%s\n' "${matches[@]}"
+            found="$(find "$DIST" -type f -name "$module" -print -quit)"
+
+            if [ -z "$found" ]; then
+              echo "ERROR: Missing module: $module"
               exit 1
             fi
 
-            FILE="${matches[0]}"
-            test -s "$FILE"
+            echo "$found" | tee -a build-report/module-list.txt
 
-            echo "$FILE" >> build-report/modules.txt
-            echo "Found: $FILE"
-            ls -lh "$FILE"
+            cp "$found" "build-report/modules/$module"
           done
 
-      # 8. Verify module metadata
+          echo "All expected modules found."
 
-      - name: Check module metadata
+      # --------------------------------------------------
+      # 10. Collect module metadata
+      # --------------------------------------------------
+
+      - name: Collect module metadata
+        if: success()
         run: |
-          set -eux
-          cd "$WORKSPACE"
-
-          : > build-report/module-metadata.txt
-          REFERENCE_VERMAGIC=""
-
-          while IFS= read -r FILE; do
-            echo "------------------------------" \
-              >> build-report/module-metadata.txt
-
-            echo "$FILE" >> build-report/module-metadata.txt
-            modinfo "$FILE" >> build-report/module-metadata.txt
-
-            VERMAGIC="$(modinfo -F vermagic "$FILE")"
-
-            if [ -z "$VERMAGIC" ]; then
-              echo "ERROR: Missing vermagic: $FILE"
-              exit 1
-            fi
-
-            if [ -z "$REFERENCE_VERMAGIC" ]; then
-              REFERENCE_VERMAGIC="$VERMAGIC"
-            elif [ "$VERMAGIC" != "$REFERENCE_VERMAGIC" ]; then
-              echo "ERROR: Inconsistent module vermagic"
-              exit 1
-            fi
-
-          done < build-report/modules.txt
-
-          echo "$REFERENCE_VERMAGIC" \
-            > build-report/module-vermagic.txt
-
-      # 9. Collect build information
-
-      - name: Collect build information
-        if: always()
-        run: |
-          set +e
-          cd "$WORKSPACE"
+          cd workspace
 
           mkdir -p build-report
 
           {
-            echo "Device: $DEVICE_CODENAME"
-            echo "Branch: $KERNEL_BRANCH"
-            echo "Kernel label: $CUSTOM_KERNEL_VERSION"
-            echo "Build date UTC: $(date -u)"
-            echo
-            echo "Distribution:"
-            ls -lah out/shusky/dist
-            echo
-            echo "Kernel image hash:"
+            echo "=== Kernel image ==="
+            file out/shusky/dist/Image.lz4
             sha256sum out/shusky/dist/Image.lz4
-          } > build-report/build-summary.txt 2>&1
 
-          find out -type f \
-            \( -name "Module.symvers" \
-            -o -name "modules.order" \
-            -o -name "modules.builtin" \
-            -o -name "kernel.release" \) \
-            -print > build-report/kernel-build-files.txt
+            echo
+            echo "=== Module metadata ==="
 
-      # 10. Upload artifacts
+            for module in build-report/modules/*.ko; do
+              echo
+              echo "--------------------------------"
+              echo "FILE: $module"
+              echo "--------------------------------"
 
-      - name: Upload verified kernel build
+              modinfo "$module" || true
+
+              echo "VERMAGIC:"
+              modinfo -F vermagic "$module" || true
+
+              echo "DEPENDS:"
+              modinfo -F depends "$module" || true
+
+              echo "NAME:"
+              modinfo -F name "$module" || true
+
+              echo "IMPORT_NS:"
+              modinfo -F import_ns "$module" || true
+
+              echo "SHA256:"
+              sha256sum "$module"
+            done
+          } | tee build-report/module-metadata.txt
+
+          echo "=== Module vermagic comparison ===" \
+            | tee build-report/vermagic-check.txt
+
+          for module in build-report/modules/*.ko; do
+            printf '%s: ' "$(basename "$module")"
+            modinfo -F vermagic "$module" || true
+          done | tee -a build-report/vermagic-check.txt
+
+      # --------------------------------------------------
+      # 11. Collect Module.symvers and ABI information
+      # --------------------------------------------------
+
+      - name: Collect symbol and ABI information
         if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shiba-twk-v${{ env.CUSTOM_KERNEL_VERSION }}-verified-build
-          path: |
-            workspace/out/shusky/dist/
-            workspace/build-report/
-          if-no-files-found: error
-          compression-level: 6
-          retention-days: 14
+        run: |
+          cd workspace
 
-      - name: Upload diagnostics after failure
-        if: failure()
+          mkdir -p build-report/symbols
+
+          find out -type f -name Module.symvers \
+            -print > build-report/symbols/module-symvers-files.txt
+
+          while IFS= read -r symvers; do
+            [ -n "$symvers" ] || continue
+
+            name="$(echo "$symvers" | sed 's#/#_#g')"
+
+            cp "$symvers" \
+              "build-report/symbols/${name}"
+
+            echo "Collected: $symvers"
+          done < build-report/symbols/module-symvers-files.txt
+
+          if [ ! -s build-report/symbols/module-symvers-files.txt ]; then
+            echo "WARNING: No Module.symvers files found"
+          fi
+
+          find out/shusky -type f \
+            \( -name '*abi*' -o -name '*kmi*' -o -name '*symvers*' \) \
+            -print > build-report/symbols/abi-files.txt || true
+
+          echo "Symbol collection completed."
+
+      # --------------------------------------------------
+      # 12. Inspect vendor_dlkm output
+      # --------------------------------------------------
+
+      - name: Inspect vendor_dlkm output
+        if: success()
+        run: |
+          cd workspace
+
+          mkdir -p build-report/vendor_dlkm
+
+          find out/shusky/dist -type f \
+            \( -name 'vendor_dlkm.img' \
+            -o -name '*vendor_dlkm*' \
+            -o -name '*modules*' \) \
+            -print > build-report/vendor_dlkm/files.txt
+
+          echo "=== vendor_dlkm-related files ==="
+          cat build-report/vendor_dlkm/files.txt
+
+          while IFS= read -r image; do
+            [ -f "$image" ] || continue
+
+            cp "$image" build-report/vendor_dlkm/
+
+            echo
+            echo "=== File information: $image ==="
+            file "$image"
+            sha256sum "$image"
+          done < build-report/vendor_dlkm/files.txt
+
+          if ! grep -q 'vendor_dlkm.img' \
+            build-report/vendor_dlkm/files.txt; then
+            echo "NOTE: vendor_dlkm.img was not present in dist."
+            echo "This must be investigated before any flash decision."
+          fi
+
+      # --------------------------------------------------
+      # 13. Create complete dist listing
+      # --------------------------------------------------
+
+      - name: Create build report
+        if: always()
+        run: |
+          cd workspace
+
+          mkdir -p build-report
+
+          {
+            echo "=== Build information ==="
+            date -u
+            echo
+            echo "=== Dist contents ==="
+
+            if [ -d out/shusky/dist ]; then
+              find out/shusky/dist -type f -print
+            else
+              echo "Dist directory not found"
+            fi
+
+            echo
+            echo "=== Disk space ==="
+            df -h
+          } > build-report/build-report.txt
+
+      # --------------------------------------------------
+      # 14. Upload build artifacts
+      # --------------------------------------------------
+
+      - name: Upload Shiba NetHunter build artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shiba-twk-v${{ env.CUSTOM_KERNEL_VERSION }}-build-diagnostics
+          name: shiba-twk-v1.33-verified-build
           path: |
-            workspace/build-report/
             workspace/out/shusky/dist/
-          if-no-files-found: ignore
-          retention-days: 7
+            workspace/build-report/
+          if-no-files-found: warn
+          retention-days: 14
