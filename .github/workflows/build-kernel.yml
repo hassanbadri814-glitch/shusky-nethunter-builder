@@ -98,7 +98,7 @@ jobs:
       # ================================================
 
       - name: Sync Google kernel source
-        timeout-minutes: 90
+        timeout-minutes: 120
         run: |
           cd workspace
 
@@ -264,22 +264,31 @@ jobs:
           PY
 
       # ================================================
-      # 8. Validate modifications
+      # 8. Validate source modifications
       # ================================================
 
       - name: Validate source modifications
         run: |
           cd workspace
 
-          git diff --check
+          echo "=== Check NetHunter defconfig ==="
+
+          test -f private/devices/google/shusky/nethunter_defconfig
 
           grep -n -A8 -B4 nethunter_defconfig \
             private/devices/google/shusky/BUILD.bazel
 
+          echo "=== Check registered wireless modules ==="
+
           grep -n -A15 -B3 cfg80211 \
             private/devices/google/zuma/constants.bzl
 
-          echo "Source modifications checked."
+          echo "=== Check whitespace in modified files ==="
+
+          git -C private/devices/google/shusky diff --check
+          git -C private/devices/google/zuma diff --check
+
+          echo "Source modifications checked successfully."
 
       # ================================================
       # 9. Build official Shusky target
