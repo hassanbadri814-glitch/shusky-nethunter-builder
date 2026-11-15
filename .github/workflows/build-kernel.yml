@@ -27,9 +27,10 @@ jobs:
       BUILD_AOSP_KERNEL: "1"
 
     steps:
-      # --------------------------------------------------
-      # 1. Prepare runner
-      # --------------------------------------------------
+
+      # ================================================
+      # 1. Prepare GitHub runner
+      # ================================================
 
       - name: Free runner disk space
         run: |
@@ -42,6 +43,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
             git \
             curl \
@@ -68,15 +70,18 @@ jobs:
       - name: Install Android repo tool
         run: |
           mkdir -p "$HOME/bin"
+
           curl -fsSL \
             https://storage.googleapis.com/git-repo-downloads/repo \
             -o "$HOME/bin/repo"
+
           chmod a+x "$HOME/bin/repo"
+
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      # --------------------------------------------------
-      # 2. Download official Google kernel source
-      # --------------------------------------------------
+      # ================================================
+      # 2. Initialize official Google source
+      # ================================================
 
       - name: Initialize Google kernel repository
         run: |
@@ -84,17 +89,46 @@ jobs:
           cd workspace
 
           repo init \
+            --depth=1 \
             -u https://android.googlesource.com/kernel/manifest \
             -b android-gs-shusky-6.1-android16
 
+      # ================================================
+      # 3. Shallow source synchronization
+      # ================================================
+
       - name: Sync Google kernel source
+        timeout-minutes: 90
         run: |
           cd workspace
-          repo sync -c -j2 --no-tags --fail-fast
 
-      # --------------------------------------------------
-      # 3. Create NetHunter configuration fragment
-      # --------------------------------------------------
+          repo sync \
+            --current-branch \
+            --no-tags \
+            --optimized-fetch \
+            --prune \
+            -j2 \
+            --fail-fast
+
+      # ================================================
+      # 4. Verify source tree
+      # ================================================
+
+      - name: Verify Google kernel source
+        run: |
+          cd workspace
+
+          test -f private/devices/google/shusky/BUILD.bazel
+          test -f private/devices/google/zuma/constants.bzl
+          test -f private/devices/google/shusky/build_shusky.sh
+
+          echo "Google Shusky source tree verified."
+
+          repo status
+
+      # ================================================
+      # 5. Create NetHunter defconfig
+      # ================================================
 
       - name: Create NetHunter defconfig
         run: |
@@ -119,12 +153,11 @@ jobs:
           CONFIG_MT76x2U=m
           EOF
 
-          echo "Created nethunter_defconfig:"
           cat private/devices/google/shusky/nethunter_defconfig
 
-      # --------------------------------------------------
-      # 4. Register defconfig in Shusky BUILD.bazel
-      # --------------------------------------------------
+      # ================================================
+      # 6. Register NetHunter defconfig
+      # ================================================
 
       - name: Register NetHunter defconfig
         run: |
@@ -145,13 +178,12 @@ jobs:
 
           if len(matches) != 1:
               raise SystemExit(
-                  "ERROR: Expected exactly one shusky_defconfig entry; "
-                  f"found {len(matches)}"
+                  f"Expected one shusky_defconfig entry, found {len(matches)}"
               )
 
           if '"nethunter_defconfig"' in content:
               raise SystemExit(
-                  "ERROR: nethunter_defconfig is already registered"
+                  "nethunter_defconfig already registered"
               )
 
           match = matches[0]
@@ -170,14 +202,14 @@ jobs:
 
           path.write_text(content)
 
-          print("Registered nethunter_defconfig successfully")
+          print("NetHunter defconfig registered.")
           PY
 
-      # --------------------------------------------------
-      # 5. Register wireless modules in ZUMA_MODULE_OUTS
-      # --------------------------------------------------
+      # ================================================
+      # 7. Register wireless modules
+      # ================================================
 
-      - name: Register NetHunter kernel modules
+      - name: Register NetHunter modules
         run: |
           cd workspace
 
@@ -194,7 +226,7 @@ jobs:
 
           if content.count(marker) != 1:
               raise SystemExit(
-                  "ERROR: Expected exactly one cfg80211 module entry"
+                  "Expected exactly one cfg80211 entry"
               )
 
           modules = [
@@ -211,7 +243,7 @@ jobs:
           for module in modules:
               if f'"{module}"' in content:
                   raise SystemExit(
-                      f"ERROR: Module already registered: {module}"
+                      f"Module already registered: {module}"
                   )
 
           addition = "\n".join(
@@ -226,14 +258,14 @@ jobs:
 
           path.write_text(content)
 
-          print("Registered additional modules:")
+          print("Wireless modules registered:")
           for module in modules:
               print(" -", module)
           PY
 
-      # --------------------------------------------------
-      # 6. Validate source modifications
-      # --------------------------------------------------
+      # ================================================
+      # 8. Validate modifications
+      # ================================================
 
       - name: Validate source modifications
         run: |
@@ -241,20 +273,17 @@ jobs:
 
           git diff --check
 
-          echo "=== Shusky BUILD.bazel ==="
           grep -n -A8 -B4 nethunter_defconfig \
             private/devices/google/shusky/BUILD.bazel
 
-          echo "=== Zuma module outputs ==="
           grep -n -A15 -B3 cfg80211 \
             private/devices/google/zuma/constants.bzl
 
-          echo "=== NetHunter defconfig ==="
-          cat private/devices/google/shusky/nethunter_defconfig
+          echo "Source modifications checked."
 
-      # --------------------------------------------------
-      # 7. Build official Shusky target
-      # --------------------------------------------------
+      # ================================================
+      # 9. Build official Shusky target
+      # ================================================
 
       - name: Build Shusky NetHunter kernel
         run: |
@@ -268,21 +297,15 @@ jobs:
           echo "Target: //private/devices/google/shusky:zuma_shusky_dist" \
             | tee -a build-report/build-status.txt
 
-          echo "Device: shiba / shusky" \
-            | tee -a build-report/build-status.txt
-
-          echo "Kernel branch: android-gs-shusky-6.1-android16" \
-            | tee -a build-report/build-status.txt
-
           ./private/devices/google/shusky/build_shusky.sh \
             --//build/kernel/kleaf:use_prebuilt_gki=false \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
             --verbose_failures \
             2>&1 | tee build-report/build.log
 
-      # --------------------------------------------------
-      # 8. Verify final kernel configuration
-      # --------------------------------------------------
+      # ================================================
+      # 10. Verify final configuration
+      # ================================================
 
       - name: Verify final kernel configuration
         if: success()
@@ -293,7 +316,7 @@ jobs:
           CONFIG="$DIST/.config"
 
           test -f "$CONFIG" || {
-            echo "ERROR: Expected dist .config not found"
+            echo "ERROR: dist/.config missing"
             find out/shusky -name .config -type f
             exit 1
           }
@@ -325,8 +348,9 @@ jobs:
             done
 
             echo
-            echo "=== KernelSU configuration, if present ==="
+            echo "=== KernelSU setting ==="
             grep -E '^CONFIG_KSU=' "$CONFIG" || true
+
           } | tee build-report/config-check.txt
 
           check_config() {
@@ -351,15 +375,15 @@ jobs:
           check_config CONFIG_MT76x2U m
 
           if grep -Eq '^CONFIG_KSU=(y|m)$' "$CONFIG"; then
-            echo "ERROR: KernelSU is enabled in the kernel config"
+            echo "ERROR: KernelSU unexpectedly enabled"
             exit 1
           fi
 
           echo "Configuration checks passed."
 
-      # --------------------------------------------------
-      # 9. Verify kernel image and module outputs
-      # --------------------------------------------------
+      # ================================================
+      # 11. Verify Image and wireless modules
+      # ================================================
 
       - name: Verify kernel image and modules
         if: success()
@@ -369,7 +393,7 @@ jobs:
           DIST="out/shusky/dist"
 
           test -f "$DIST/Image.lz4" || {
-            echo "ERROR: Image.lz4 not found"
+            echo "ERROR: Image.lz4 missing"
             find "$DIST" -maxdepth 3 -type f
             exit 1
           }
@@ -392,8 +416,6 @@ jobs:
           : > build-report/module-list.txt
 
           for module in "${MODULES[@]}"; do
-            echo "Checking $module"
-
             found="$(find "$DIST" -type f -name "$module" -print -quit)"
 
             if [ -z "$found" ]; then
@@ -408,16 +430,14 @@ jobs:
 
           echo "All expected modules found."
 
-      # --------------------------------------------------
-      # 10. Collect module metadata
-      # --------------------------------------------------
+      # ================================================
+      # 12. Collect module metadata
+      # ================================================
 
       - name: Collect module metadata
         if: success()
         run: |
           cd workspace
-
-          mkdir -p build-report
 
           {
             echo "=== Kernel image ==="
@@ -429,9 +449,7 @@ jobs:
 
             for module in build-report/modules/*.ko; do
               echo
-              echo "--------------------------------"
               echo "FILE: $module"
-              echo "--------------------------------"
 
               modinfo "$module" || true
 
@@ -447,22 +465,19 @@ jobs:
               echo "IMPORT_NS:"
               modinfo -F import_ns "$module" || true
 
-              echo "SHA256:"
               sha256sum "$module"
             done
-          } | tee build-report/module-metadata.txt
 
-          echo "=== Module vermagic comparison ===" \
-            | tee build-report/vermagic-check.txt
+          } | tee build-report/module-metadata.txt
 
           for module in build-report/modules/*.ko; do
             printf '%s: ' "$(basename "$module")"
             modinfo -F vermagic "$module" || true
-          done | tee -a build-report/vermagic-check.txt
+          done > build-report/vermagic-check.txt
 
-      # --------------------------------------------------
-      # 11. Collect Module.symvers and ABI information
-      # --------------------------------------------------
+      # ================================================
+      # 13. Collect Module.symvers
+      # ================================================
 
       - name: Collect symbol and ABI information
         if: success()
@@ -482,22 +497,17 @@ jobs:
             cp "$symvers" \
               "build-report/symbols/${name}"
 
-            echo "Collected: $symvers"
           done < build-report/symbols/module-symvers-files.txt
 
-          if [ ! -s build-report/symbols/module-symvers-files.txt ]; then
-            echo "WARNING: No Module.symvers files found"
-          fi
-
           find out/shusky -type f \
-            \( -name '*abi*' -o -name '*kmi*' -o -name '*symvers*' \) \
+            \( -iname '*abi*' -o -iname '*kmi*' -o -iname '*symvers*' \) \
             -print > build-report/symbols/abi-files.txt || true
 
-          echo "Symbol collection completed."
+          echo "Symbol and ABI collection completed."
 
-      # --------------------------------------------------
-      # 12. Inspect vendor_dlkm output
-      # --------------------------------------------------
+      # ================================================
+      # 14. Inspect vendor_dlkm outputs
+      # ================================================
 
       - name: Inspect vendor_dlkm output
         if: success()
@@ -512,7 +522,6 @@ jobs:
             -o -name '*modules*' \) \
             -print > build-report/vendor_dlkm/files.txt
 
-          echo "=== vendor_dlkm-related files ==="
           cat build-report/vendor_dlkm/files.txt
 
           while IFS= read -r image; do
@@ -520,21 +529,19 @@ jobs:
 
             cp "$image" build-report/vendor_dlkm/
 
-            echo
-            echo "=== File information: $image ==="
             file "$image"
             sha256sum "$image"
+
           done < build-report/vendor_dlkm/files.txt
 
           if ! grep -q 'vendor_dlkm.img' \
             build-report/vendor_dlkm/files.txt; then
-            echo "NOTE: vendor_dlkm.img was not present in dist."
-            echo "This must be investigated before any flash decision."
+            echo "WARNING: vendor_dlkm.img not found in dist."
           fi
 
-      # --------------------------------------------------
-      # 13. Create complete dist listing
-      # --------------------------------------------------
+      # ================================================
+      # 15. Create build report
+      # ================================================
 
       - name: Create build report
         if: always()
@@ -546,6 +553,7 @@ jobs:
           {
             echo "=== Build information ==="
             date -u
+
             echo
             echo "=== Dist contents ==="
 
@@ -558,11 +566,12 @@ jobs:
             echo
             echo "=== Disk space ==="
             df -h
+
           } > build-report/build-report.txt
 
-      # --------------------------------------------------
-      # 14. Upload build artifacts
-      # --------------------------------------------------
+      # ================================================
+      # 16. Upload artifact
+      # ================================================
 
       - name: Upload Shiba NetHunter build artifact
         if: always()
