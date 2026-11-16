@@ -1,1 +1,659 @@
-SYMBOLS='__dev_kfree_skb_irq|__ioread32_copy|__iowrite32_copy|dev_set_threaded|of_get_mac_address|pci_disable_link_state|pcie_capability_clear_and_set_word|radix_tree_tagged|rfkill_pause_polling|sched_set_fifo_low|skb_to_sgvec|skb_unlink|usb_alloc_urb|usb_anchor_urb|usb_bulk_msg|usb_control_msg|usb_deregister|usb_free_urb|usb_get_dev|usb_init_urb|usb_kill_anchored_urbs|usb_kill_urb|usb_poison_urb|usb_put_dev|usb_register_driver|usb_reset_device|usb_submit_urb|usb_unanchor_urb|usb_unpoison_urb|__traceiter_android_vh_sha256|__traceiter_android_vh_aes_expandkey|__traceiter_android_vh_aes_encrypt|__traceiter_android_vh_aes_decrypt|__tracepoint_android_vh_sha256|__tracepoint_android_vh_aes_expandkey|__tracepoint_android_vh_aes_encrypt|__tracepoint_android_vh_aes_decrypt'
+name: Build Pixel 8 Shiba - NetHunter Safe Baseline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shiba-nethunter-kernel-build
+  cancel-in-progress: false
+
+jobs:
+  build-kernel:
+    name: Build and verify Shiba safe baseline kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      DEVICE: shiba
+      KERNEL_DEVICE: shusky
+      CUSTOM_KERNEL_VERSION: "1.33"
+
+    steps:
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo apt-get clean
+          df -h
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl python3 python3-pip python-is-python3 \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            libncurses-dev dwarves zip unzip rsync ccache file \
+            kmod xz-utils zstd
+
+      - name: Install Android repo tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/bin"
+          curl -fsSL \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Initialize Google kernel repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p workspace
+          cd workspace
+          repo init \
+            --depth=1 \
+            -u https://android.googlesource.com/kernel/manifest \
+            -b android-gs-shusky-6.1-android16
+
+      - name: Sync Google kernel source
+        timeout-minutes: 120
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+          repo sync \
+            --current-branch \
+            --no-tags \
+            --optimized-fetch \
+            --prune \
+            -j2 \
+            --fail-fast
+
+      - name: Verify Google kernel source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          for file in \
+            private/devices/google/shusky/BUILD.bazel \
+            private/devices/google/zuma/constants.bzl \
+            private/devices/google/shusky/build_shusky.sh
+          do
+            test -f "$file" || {
+              echo "MISSING: $file"
+              exit 1
+            }
+            echo "FOUND: $file"
+          done
+
+          echo "=== Pixel ABI reference ==="
+          grep -n -A5 -B5 'kmi_symbol_list' \
+            private/devices/google/shusky/BUILD.bazel || true
+
+          echo "=== Repository status ==="
+          repo status
+
+      - name: Create safe baseline defconfig
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          cat > private/devices/google/shusky/nethunter_defconfig <<'EOF'
+          # NetHunter safe baseline
+          # RTL8187 and MT76 intentionally excluded.
+
+          CONFIG_MODULES=y
+          CONFIG_MODVERSIONS=y
+          CONFIG_WLAN=y
+          CONFIG_CFG80211=m
+          CONFIG_MAC80211=m
+          CONFIG_USB=y
+          EOF
+
+          cat private/devices/google/shusky/nethunter_defconfig
+
+          if grep -Eq \
+            '^CONFIG_(RTL8187|MT76[^=]*)=(y|m)$' \
+            private/devices/google/shusky/nethunter_defconfig; then
+            echo "ERROR: Excluded wireless driver found."
+            exit 1
+          fi
+
+      - name: Register safe baseline defconfig
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("private/devices/google/shusky/BUILD.bazel")
+          content = path.read_text()
+
+          if '"nethunter_defconfig"' in content:
+              raise SystemExit(
+                  "ERROR: nethunter_defconfig already registered"
+              )
+
+          pattern = r'(?m)^(\s*)"shusky_defconfig",\s*$'
+          matches = list(re.finditer(pattern, content))
+
+          if len(matches) != 1:
+              raise SystemExit(
+                  f"Expected one shusky_defconfig entry; found {len(matches)}"
+              )
+
+          match = matches[0]
+          indent = match.group(1)
+
+          replacement = (
+              f'{indent}"shusky_defconfig",\n'
+              f'{indent}"nethunter_defconfig",'
+          )
+
+          path.write_text(
+              content[:match.start()]
+              + replacement
+              + content[match.end():]
+          )
+
+          print("Safe baseline defconfig registered.")
+          PY
+
+      - name: Validate source modifications
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          grep -n -A8 -B4 \
+            nethunter_defconfig \
+            private/devices/google/shusky/BUILD.bazel
+
+          if grep -niE \
+            'rtl8187|mt76|eeprom_93cx6' \
+            private/devices/google/zuma/constants.bzl; then
+            echo "ERROR: Excluded wireless module reference found."
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
+
+          files = [
+              Path("private/devices/google/shusky/BUILD.bazel"),
+              Path("private/devices/google/shusky/nethunter_defconfig"),
+          ]
+
+          failed = False
+
+          for path in files:
+              data = path.read_bytes()
+
+              if not data.endswith(b"\n"):
+                  print(f"ERROR: Missing final newline: {path}")
+                  failed = True
+
+              for number, line in enumerate(data.decode().splitlines(), 1):
+                  if line.rstrip(" \t") != line:
+                      print(f"ERROR: Trailing whitespace: {path}:{number}")
+                      failed = True
+
+                  if line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")):
+                      print(f"ERROR: Conflict marker: {path}:{number}")
+                      failed = True
+
+          if failed:
+              sys.exit(1)
+
+          print("Source validation passed.")
+          PY
+
+      - name: Build Shusky safe baseline kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          mkdir -p build-report
+
+          {
+            echo "Build started: $(date -u)"
+            echo "Device: $DEVICE"
+            echo "Kernel target: $KERNEL_DEVICE"
+            echo "Kernel version label: $CUSTOM_KERNEL_VERSION"
+            echo "Target: //private/devices/google/shusky:zuma_shusky_dist"
+            echo "Build type: SAFE BASELINE"
+            echo "RTL8187: EXCLUDED"
+            echo "MT76: EXCLUDED"
+            echo "Strict Pixel KMI: ENABLED"
+            echo "KernelSU inline: DISABLED"
+            echo "FIPS module: NOT ADDED - EXPORT CHECK ONLY"
+            echo "Flash operations: NONE"
+          } | tee build-report/build-status.txt
+
+          ./private/devices/google/shusky/build_shusky.sh \
+            --kernel_package=@//aosp \
+            --//build/kernel/kleaf:use_prebuilt_gki=false \
+            --no//private/devices/google/common:download_prebuilt_gki_fips140 \
+            --verbose_failures \
+            2>&1 | tee build-report/build.log
+
+      - name: Collect build diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd workspace
+
+          mkdir -p build-report/diagnostics
+          mkdir -p build-report/symbols
+
+          if [ -d out/shusky/dist ]; then
+            find out/shusky/dist -maxdepth 3 -type f \
+              -print \
+              > build-report/diagnostics/dist-files.txt
+          else
+            echo "Dist directory not found." \
+              > build-report/diagnostics/dist-files.txt
+          fi
+
+          echo "=== Relevant build errors ==="
+
+          if [ -f build-report/build.log ]; then
+            grep -n -A60 -B5 \
+              'kmi_symbol_list_violations' \
+              build-report/build.log || true
+
+            grep -n -A60 -B5 \
+              'missing from the symbol list' \
+              build-report/build.log || true
+
+            grep -n -i -E \
+              'error:|failed|fatal' \
+              build-report/build.log \
+              | tail -n 150 || true
+          fi
+
+          find . -type f \
+            -name Module.symvers \
+            -not -path '*/.git/*' \
+            -not -path '*/.repo/*' \
+            -print \
+            > build-report/symbols/module-symvers-files.txt
+
+          echo "=== Module.symvers files ==="
+          cat build-report/symbols/module-symvers-files.txt
+
+          find out common -type f \
+            \( \
+              -name abi_symbollist.raw \
+              -o -name abi_gki_protected_exports_aarch64 \
+              -o -name '*abi*' \
+            \) \
+            -not -path '*/.git/*' \
+            -not -path '*/.repo/*' \
+            -print 2>/dev/null \
+            > build-report/diagnostics/abi-files.txt
+
+          echo "=== ABI files ==="
+          cat build-report/diagnostics/abi-files.txt
+
+      - name: Analyze exported symbols and ABI
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd workspace
+
+          mkdir -p build-report/symbol-analysis
+
+          REPORT="build-report/symbol-analysis"
+          MANIFEST="build-report/symbols/module-symvers-files.txt"
+
+          SYMBOLS='__dev_kfree_skb_irq|__ioread32_copy|__iowrite32_copy|dev_set_threaded|of_get_mac_address|pci_disable_link_state|pcie_capability_clear_and_set_word|radix_tree_tagged|rfkill_pause_polling|sched_set_fifo_low|skb_to_sgvec|skb_unlink|usb_alloc_urb|usb_anchor_urb|usb_bulk_msg|usb_control_msg|usb_deregister|usb_free_urb|usb_get_dev|usb_init_urb|usb_kill_anchored_urbs|usb_kill_urb|usb_poison_urb|usb_put_dev|usb_register_driver|usb_reset_device|usb_submit_urb|usb_unanchor_urb|usb_unpoison_urb|__traceiter_android_vh_sha256|__traceiter_android_vh_aes_expandkey|__traceiter_android_vh_aes_encrypt|__traceiter_android_vh_aes_decrypt|__tracepoint_android_vh_sha256|__tracepoint_android_vh_aes_expandkey|__tracepoint_android_vh_aes_encrypt|__tracepoint_android_vh_aes_decrypt'
+
+          : > "$REPORT/module-symbols.txt"
+          : > "$REPORT/abi-symbols.txt"
+
+          echo "=== Module.symvers analysis ==="
+
+          if [ -s "$MANIFEST" ]; then
+            while IFS= read -r file; do
+              [ -n "$file" ] || continue
+              [ -f "$file" ] || continue
+
+              {
+                echo
+                echo "===== $file ====="
+
+                grep -nE \
+                  "^[^[:space:]]+[[:space:]]+(${SYMBOLS})[[:space:]]" \
+                  "$file" || true
+              } >> "$REPORT/module-symbols.txt"
+            done < "$MANIFEST"
+          else
+            echo "No Module.symvers files found." \
+              > "$REPORT/module-symbols.txt"
+          fi
+
+          ABI_FILES="build-report/diagnostics/abi-files.txt"
+
+          if [ -s "$ABI_FILES" ]; then
+            while IFS= read -r file; do
+              [ -f "$file" ] || continue
+
+              {
+                echo
+                echo "===== $file ====="
+
+                grep -nE \
+                  "^(${SYMBOLS})([[:space:]]|$)" \
+                  "$file" || true
+              } >> "$REPORT/abi-symbols.txt"
+            done < "$ABI_FILES"
+          else
+            echo "No ABI files found." \
+              > "$REPORT/abi-symbols.txt"
+          fi
+
+          echo "=== Module symbol matches ==="
+          cat "$REPORT/module-symbols.txt"
+
+          echo "=== ABI symbol matches ==="
+          cat "$REPORT/abi-symbols.txt"
+
+      - name: Verify final kernel configuration
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          CONFIG="$(find out -type f \
+            -path '*shusky*' \
+            -name .config \
+            -print -quit 2>/dev/null || true)"
+
+          if [ -z "$CONFIG" ] || [ ! -f "$CONFIG" ]; then
+            echo "ERROR: Shusky kernel .config not found."
+            find out -type f -name .config -print || true
+            exit 1
+          fi
+
+          echo "Using config: $CONFIG"
+          cp "$CONFIG" build-report/final.config
+
+          {
+            echo "=== Required baseline configuration ==="
+
+            for option in \
+              CONFIG_MODULES \
+              CONFIG_MODVERSIONS \
+              CONFIG_ANDROID_VENDOR_HOOKS \
+              CONFIG_ARM64_MODULE_PLTS \
+              CONFIG_WLAN \
+              CONFIG_CFG80211 \
+              CONFIG_MAC80211 \
+              CONFIG_USB \
+              CONFIG_KSU \
+              CONFIG_RTL8187 \
+              CONFIG_MT76_CORE \
+              CONFIG_MT76_USB \
+              CONFIG_MT76x2U
+            do
+              grep -E "^${option}=" "$CONFIG" || true
+              grep -E "^# ${option} is not set$" "$CONFIG" || true
+            done
+          } | tee build-report/config-check.txt
+
+          check_config() {
+            option="$1"
+            expected="$2"
+
+            if ! grep -qx "${option}=${expected}" "$CONFIG"; then
+              echo "ERROR: ${option} is not ${expected}"
+              exit 1
+            fi
+          }
+
+          check_config CONFIG_MODULES y
+          check_config CONFIG_MODVERSIONS y
+          check_config CONFIG_ANDROID_VENDOR_HOOKS y
+          check_config CONFIG_ARM64_MODULE_PLTS y
+          check_config CONFIG_WLAN y
+          check_config CONFIG_CFG80211 m
+          check_config CONFIG_MAC80211 m
+          check_config CONFIG_USB y
+
+          if grep -Eq \
+            '^CONFIG_(RTL8187|MT76[^=]*)=(y|m)$' \
+            "$CONFIG"; then
+            echo "ERROR: RTL8187 or MT76 unexpectedly enabled."
+            exit 1
+          fi
+
+          if grep -Eq '^CONFIG_KSU=(y|m)$' "$CONFIG"; then
+            echo "ERROR: KernelSU unexpectedly built into kernel."
+            exit 1
+          fi
+
+          echo "Baseline and FIPS prerequisite configuration checks passed."
+
+      - name: Verify kernel image and baseline modules
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          DIST="out/shusky/dist"
+
+          if [ ! -d "$DIST" ]; then
+            echo "ERROR: Expected dist directory not found."
+            find out/shusky -maxdepth 4 -type f -print || true
+            exit 1
+          fi
+
+          IMAGE="$(find "$DIST" -type f \
+            \( -name Image.lz4 -o -name Image \) \
+            -print -quit)"
+
+          if [ -z "$IMAGE" ]; then
+            echo "ERROR: No Image or Image.lz4 found."
+            find "$DIST" -maxdepth 4 -type f -print
+            exit 1
+          fi
+
+          file "$IMAGE"
+          sha256sum "$IMAGE"
+
+          mkdir -p build-report/modules
+          : > build-report/module-list.txt
+
+          for module in cfg80211.ko mac80211.ko; do
+            FOUND="$(find out -type f \
+              -path '*shusky*' \
+              -name "$module" \
+              -print -quit)"
+
+            if [ -z "$FOUND" ]; then
+              echo "ERROR: $module was not found."
+              find out -type f -name "$module" -print || true
+              exit 1
+            fi
+
+            echo "$FOUND" | tee -a build-report/module-list.txt
+            cp "$FOUND" "build-report/modules/$module"
+          done
+
+          if find out/shusky -type f \
+            \( \
+              -name 'rtl8187.ko' \
+              -o -name 'mt76.ko' \
+              -o -name 'mt76-usb.ko' \
+              -o -name 'mt76x02-lib.ko' \
+              -o -name 'mt76x02-usb.ko' \
+              -o -name 'mt76x2-common.ko' \
+              -o -name 'mt76x2u.ko' \
+            \) | grep .; then
+            echo "ERROR: An excluded wireless driver was found."
+            exit 1
+          fi
+
+          echo "Excluded wireless modules are absent."
+          echo "Kernel image and baseline modules verified."
+
+      - name: Collect module metadata
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          {
+            echo "=== Kernel image ==="
+            find out/shusky/dist -type f \
+              \( -name Image -o -name Image.lz4 \) \
+              -exec file {} \; \
+              -exec sha256sum {} \;
+
+            echo
+            echo "=== Module metadata ==="
+
+            for module in build-report/modules/*.ko; do
+              echo
+              echo "FILE: $module"
+              modinfo "$module" || true
+              echo "VERMAGIC:"
+              modinfo -F vermagic "$module" || true
+              echo "DEPENDS:"
+              modinfo -F depends "$module" || true
+              echo "NAME:"
+              modinfo -F name "$module" || true
+              echo "IMPORT_NS:"
+              modinfo -F import_ns "$module" || true
+              sha256sum "$module"
+            done
+          } | tee build-report/module-metadata.txt
+
+          for module in build-report/modules/*.ko; do
+            printf '%s: ' "$(basename "$module")"
+            modinfo -F vermagic "$module" || true
+          done > build-report/vermagic-check.txt
+
+      - name: Inspect vendor_dlkm output
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          mkdir -p build-report/vendor_dlkm
+
+          find out/shusky/dist -type f \
+            \( \
+              -name 'vendor_dlkm.img' \
+              -o -name '*vendor_dlkm*' \
+              -o -name '*modules*' \
+            \) \
+            -print \
+            > build-report/vendor_dlkm/files.txt
+
+          cat build-report/vendor_dlkm/files.txt
+
+          while IFS= read -r image; do
+            [ -f "$image" ] || continue
+            cp "$image" build-report/vendor_dlkm/
+            file "$image"
+            sha256sum "$image"
+          done < build-report/vendor_dlkm/files.txt
+
+          if ! grep -q 'vendor_dlkm.img' \
+            build-report/vendor_dlkm/files.txt; then
+            echo "WARNING: vendor_dlkm.img not found in dist."
+          fi
+
+      - name: Create build report
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd workspace
+
+          mkdir -p build-report
+
+          {
+            echo "=== Build information ==="
+            date -u
+
+            echo
+            echo "=== Build status ==="
+            cat build-report/build-status.txt 2>/dev/null || true
+
+            echo
+            echo "=== Build result ==="
+            if [ -f build-report/build.log ]; then
+              if grep -qiE \
+                'Build completed successfully|build completed' \
+                build-report/build.log; then
+                echo "Possible successful build marker found."
+              else
+                echo "No success marker found. Check Actions result."
+              fi
+            else
+              echo "Build log not found."
+            fi
+
+            echo
+            echo "=== Dist contents ==="
+            if [ -d out/shusky/dist ]; then
+              find out/shusky/dist -type f -print
+            else
+              echo "Dist directory not found."
+            fi
+
+            echo
+            echo "=== FIPS symbol analysis ==="
+            cat build-report/symbol-analysis/module-symbols.txt 2>/dev/null || true
+            cat build-report/symbol-analysis/abi-symbols.txt 2>/dev/null || true
+
+            echo
+            echo "=== Config check ==="
+            cat build-report/config-check.txt 2>/dev/null || true
+
+            echo
+            echo "=== Disk space ==="
+            df -h
+          } > build-report/build-report.txt
+
+          cat build-report/build-report.txt
+
+      - name: Upload Shiba safe baseline artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-nethunter-safe-baseline-fips-check
+          path: |
+            workspace/out/shusky/dist/
+            workspace/build-report/
+          if-no-files-found: warn
+          retention-days: 14
