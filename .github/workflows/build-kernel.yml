@@ -1,4 +1,5 @@
-name: Build Pixel 8 Shiba - NetHunter Safe Baseline
+
+name: Build Pixel 8 Shiba - NetHunter FIPS Build Test
 
 on:
   workflow_dispatch:
@@ -15,7 +16,7 @@ concurrency:
 
 jobs:
   build-kernel:
-    name: Build and verify Shiba safe baseline kernel
+    name: Build and verify Shiba FIPS test kernel
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -44,7 +45,7 @@ jobs:
             git curl python3 python3-pip python-is-python3 \
             build-essential bc bison flex libssl-dev libelf-dev \
             libncurses-dev dwarves zip unzip rsync ccache file \
-            kmod xz-utils zstd
+            kmod xz-utils zstd binutils
 
       - name: Install Android repo tool
         shell: bash
@@ -91,7 +92,11 @@ jobs:
           for file in \
             private/devices/google/shusky/BUILD.bazel \
             private/devices/google/zuma/constants.bzl \
-            private/devices/google/shusky/build_shusky.sh
+            private/devices/google/shusky/build_shusky.sh \
+            common/arch/arm64/Makefile.postlink \
+            common/crypto/fips140-module.c \
+            common/crypto/fips140_gen_hmac.c \
+            common/arch/arm64/configs/fips140_gki.fragment
           do
             test -f "$file" || {
               echo "MISSING: $file"
@@ -104,18 +109,24 @@ jobs:
           grep -n -A5 -B5 'kmi_symbol_list' \
             private/devices/google/shusky/BUILD.bazel || true
 
+          echo "=== FIPS postlink implementation ==="
+          grep -n -A20 -B5 \
+            'cmd_gen_hmac\|fips140.ko' \
+            common/arch/arm64/Makefile.postlink
+
           echo "=== Repository status ==="
           repo status
 
-      - name: Create safe baseline defconfig
+      - name: Create safe baseline FIPS test defconfig
         shell: bash
         run: |
           set -euo pipefail
           cd workspace
 
           cat > private/devices/google/shusky/nethunter_defconfig <<'EOF'
-          # NetHunter safe baseline
+          # NetHunter safe baseline with experimental FIPS 140 test
           # RTL8187 and MT76 intentionally excluded.
+          # FIPS module collected as standalone build artifact only.
 
           CONFIG_MODULES=y
           CONFIG_MODVERSIONS=y
@@ -123,6 +134,10 @@ jobs:
           CONFIG_CFG80211=m
           CONFIG_MAC80211=m
           CONFIG_USB=y
+
+          # Experimental FIPS 140 cryptographic module
+          CONFIG_CRYPTO_FIPS140_MOD=m
+          # CONFIG_MODULE_SIG_ALL is not set
           EOF
 
           cat private/devices/google/shusky/nethunter_defconfig
@@ -134,7 +149,11 @@ jobs:
             exit 1
           fi
 
-      - name: Register safe baseline defconfig
+          grep -qx \
+            'CONFIG_CRYPTO_FIPS140_MOD=m' \
+            private/devices/google/shusky/nethunter_defconfig
+
+      - name: Register FIPS test defconfig and module output
         shell: bash
         run: |
           set -euo pipefail
@@ -168,14 +187,55 @@ jobs:
               f'{indent}"nethunter_defconfig",'
           )
 
-          path.write_text(
+          content = (
               content[:match.start()]
               + replacement
               + content[match.end():]
           )
 
-          print("Safe baseline defconfig registered.")
+          module_pattern = (
+              r'(?m)^(\s*)module_outs\s*=\s*'
+              r'ZUMA_MODULE_OUTS\s*,\s*$'
+          )
+          module_matches = list(re.finditer(module_pattern, content))
+
+          if len(module_matches) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one "
+                  "module_outs = ZUMA_MODULE_OUTS entry; "
+                  f"found {len(module_matches)}"
+              )
+
+          module_match = module_matches[0]
+          module_indent = module_match.group(1)
+
+          module_replacement = (
+              f'{module_indent}module_outs = '
+              'ZUMA_MODULE_OUTS + ["crypto/fips140.ko"],'
+          )
+
+          content = (
+              content[:module_match.start()]
+              + module_replacement
+              + content[module_match.end():]
+          )
+
+          path.write_text(content)
+
+          print("FIPS test defconfig registered.")
+          print("crypto/fips140.ko added to Shusky module outputs.")
           PY
+
+          echo "=== Defconfig registration ==="
+          grep -n -A5 -B3 \
+            nethunter_defconfig \
+            private/devices/google/shusky/BUILD.bazel
+
+          echo
+          echo "=== FIPS module output registration ==="
+          grep -n -A2 -B2 \
+            'crypto/fips140.ko' \
+            private/devices/google/shusky/BUILD.bazel
 
       - name: Validate source modifications
         shell: bash
@@ -183,9 +243,19 @@ jobs:
           set -euo pipefail
           cd workspace
 
-          grep -n -A8 -B4 \
-            nethunter_defconfig \
-            private/devices/google/shusky/BUILD.bazel
+          grep -Fq \
+            'ZUMA_MODULE_OUTS + ["crypto/fips140.ko"]' \
+            private/devices/google/shusky/BUILD.bazel || {
+              echo "ERROR: FIPS module output not registered."
+              exit 1
+            }
+
+          grep -qx \
+            'CONFIG_CRYPTO_FIPS140_MOD=m' \
+            private/devices/google/shusky/nethunter_defconfig || {
+              echo "ERROR: FIPS configuration missing."
+              exit 1
+            }
 
           if grep -niE \
             'rtl8187|mt76|eeprom_93cx6' \
@@ -227,7 +297,7 @@ jobs:
           print("Source validation passed.")
           PY
 
-      - name: Build Shusky safe baseline kernel
+      - name: Build Shusky FIPS test kernel
         shell: bash
         run: |
           set -euo pipefail
@@ -241,12 +311,14 @@ jobs:
             echo "Kernel target: $KERNEL_DEVICE"
             echo "Kernel version label: $CUSTOM_KERNEL_VERSION"
             echo "Target: //private/devices/google/shusky:zuma_shusky_dist"
-            echo "Build type: SAFE BASELINE"
+            echo "Build type: SAFE BASELINE + FIPS BUILD TEST"
             echo "RTL8187: EXCLUDED"
             echo "MT76: EXCLUDED"
             echo "Strict Pixel KMI: ENABLED"
             echo "KernelSU inline: DISABLED"
-            echo "FIPS module: NOT ADDED - EXPORT CHECK ONLY"
+            echo "FIPS crypto module: ENABLED AS BUILD OUTPUT"
+            echo "FIPS HMAC postlink: REQUIRED"
+            echo "FIPS device image integration: NOT REQUESTED"
             echo "Flash operations: NONE"
           } | tee build-report/build-status.txt
 
@@ -268,7 +340,7 @@ jobs:
           mkdir -p build-report/symbols
 
           if [ -d out/shusky/dist ]; then
-            find out/shusky/dist -maxdepth 3 -type f \
+            find out/shusky/dist -maxdepth 4 -type f \
               -print \
               > build-report/diagnostics/dist-files.txt
           else
@@ -288,9 +360,9 @@ jobs:
               build-report/build.log || true
 
             grep -n -i -E \
-              'error:|failed|fatal' \
+              'error:|failed|fatal|HMAC' \
               build-report/build.log \
-              | tail -n 150 || true
+              | tail -n 200 || true
           fi
 
           find . -type f \
@@ -403,7 +475,7 @@ jobs:
           cp "$CONFIG" build-report/final.config
 
           {
-            echo "=== Required baseline configuration ==="
+            echo "=== Required configuration ==="
 
             for option in \
               CONFIG_MODULES \
@@ -414,6 +486,10 @@ jobs:
               CONFIG_CFG80211 \
               CONFIG_MAC80211 \
               CONFIG_USB \
+              CONFIG_CRYPTO_FIPS140_MOD \
+              CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS \
+              CONFIG_CRYPTO_FIPS140_MOD_EVAL_TESTING \
+              CONFIG_MODULE_SIG_ALL \
               CONFIG_KSU \
               CONFIG_RTL8187 \
               CONFIG_MT76_CORE \
@@ -443,6 +519,8 @@ jobs:
           check_config CONFIG_CFG80211 m
           check_config CONFIG_MAC80211 m
           check_config CONFIG_USB y
+          check_config CONFIG_CRYPTO_FIPS140_MOD m
+          check_config CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS y
 
           if grep -Eq \
             '^CONFIG_(RTL8187|MT76[^=]*)=(y|m)$' \
@@ -456,7 +534,87 @@ jobs:
             exit 1
           fi
 
-          echo "Baseline and FIPS prerequisite configuration checks passed."
+          if grep -Eq \
+            '^CONFIG_(CRYPTO_FIPS140_MOD_EVAL_TESTING|MODULE_SIG_ALL)=(y|m)$' \
+            "$CONFIG"; then
+            echo "ERROR: Unexpected FIPS evaluation or module signing configuration."
+            exit 1
+          fi
+
+          echo "FIPS and baseline configuration checks passed."
+
+      - name: Verify FIPS module and integrity postlink
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          mkdir -p build-report/fips
+
+          echo "=== Find FIPS module ==="
+
+          FIPS_MODULE="$(find out/shusky -type f \
+            -path '*/crypto/fips140.ko' \
+            -print -quit)"
+
+          if [ -z "$FIPS_MODULE" ]; then
+            echo "ERROR: crypto/fips140.ko not found."
+            find out -type f -name '*fips140*' -print || true
+            exit 1
+          fi
+
+          echo "Found: $FIPS_MODULE"
+          cp "$FIPS_MODULE" build-report/fips/fips140.ko
+
+          echo
+          echo "=== Module metadata ==="
+          modinfo build-report/fips/fips140.ko \
+            | tee build-report/fips/modinfo.txt
+
+          echo
+          echo "=== Module vermagic ==="
+          modinfo -F vermagic \
+            build-report/fips/fips140.ko \
+            | tee build-report/fips/vermagic.txt
+
+          echo
+          echo "=== ELF section verification ==="
+          readelf -SW build-report/fips/fips140.ko \
+            | tee build-report/fips/sections.txt
+
+          grep -q '\.init\.rela\.text' \
+            build-report/fips/sections.txt || {
+              echo "ERROR: .init.rela.text missing."
+              exit 1
+            }
+
+          grep -q '\.init\.rela\.rodata' \
+            build-report/fips/sections.txt || {
+              echo "ERROR: .init.rela.rodata missing."
+              exit 1
+            }
+
+          echo
+          echo "=== HMAC postlink log ==="
+
+          if grep -n -E \
+            'HMAC[[:space:]]+.*fips140\.ko' \
+            build-report/build.log \
+            | tee build-report/fips/hmac-postlink.txt; then
+            echo "HMAC postlink log entry found."
+          else
+            echo "ERROR: HMAC postlink log entry not found."
+            exit 1
+          fi
+
+          echo
+          echo "=== FIPS module SHA256 ==="
+          sha256sum build-report/fips/fips140.ko \
+            | tee build-report/fips/sha256.txt
+
+          echo
+          echo "FIPS module and postlink checks passed."
 
       - name: Verify kernel image and baseline modules
         if: success()
@@ -539,7 +697,10 @@ jobs:
             echo
             echo "=== Module metadata ==="
 
-            for module in build-report/modules/*.ko; do
+            for module in build-report/modules/*.ko \
+                          build-report/fips/fips140.ko; do
+              [ -f "$module" ] || continue
+
               echo
               echo "FILE: $module"
               modinfo "$module" || true
@@ -555,7 +716,9 @@ jobs:
             done
           } | tee build-report/module-metadata.txt
 
-          for module in build-report/modules/*.ko; do
+          for module in build-report/modules/*.ko \
+                        build-report/fips/fips140.ko; do
+            [ -f "$module" ] || continue
             printf '%s: ' "$(basename "$module")"
             modinfo -F vermagic "$module" || true
           done > build-report/vermagic-check.txt
@@ -590,6 +753,16 @@ jobs:
           if ! grep -q 'vendor_dlkm.img' \
             build-report/vendor_dlkm/files.txt; then
             echo "WARNING: vendor_dlkm.img not found in dist."
+          fi
+
+          echo
+          echo "=== Check FIPS module image integration ==="
+
+          if find out/shusky/dist -type f \
+            \( -name 'vendor_dlkm.img' -o -name 'system_dlkm.img' \) \
+            | grep .; then
+            echo "Images are build outputs; this workflow does not flash them."
+            echo "Standalone FIPS module output is separately collected."
           fi
 
       - name: Create build report
@@ -632,6 +805,22 @@ jobs:
             fi
 
             echo
+            echo "=== FIPS verification ==="
+            for file in \
+              build-report/fips/modinfo.txt \
+              build-report/fips/vermagic.txt \
+              build-report/fips/sections.txt \
+              build-report/fips/hmac-postlink.txt \
+              build-report/fips/sha256.txt
+            do
+              if [ -f "$file" ]; then
+                echo
+                echo "--- $file ---"
+                cat "$file"
+              fi
+            done
+
+            echo
             echo "=== FIPS symbol analysis ==="
             cat build-report/symbol-analysis/module-symbols.txt 2>/dev/null || true
             cat build-report/symbol-analysis/abi-symbols.txt 2>/dev/null || true
@@ -647,11 +836,11 @@ jobs:
 
           cat build-report/build-report.txt
 
-      - name: Upload Shiba safe baseline artifact
+      - name: Upload Shiba NetHunter FIPS build-test artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shiba-nethunter-safe-baseline-fips-check
+          name: shiba-nethunter-fips-build-test
           path: |
             workspace/out/shusky/dist/
             workspace/build-report/
