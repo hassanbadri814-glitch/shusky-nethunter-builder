@@ -94,7 +94,7 @@ jobs:
             -b android-gs-shusky-6.1-android16
 
       # ================================================
-      # 3. Shallow source synchronization
+      # 3. Sync Google kernel source
       # ================================================
 
       - name: Sync Google kernel source
@@ -111,7 +111,7 @@ jobs:
             --fail-fast
 
       # ================================================
-      # 4. Verify source tree
+      # 4. Verify Google source tree
       # ================================================
 
       - name: Verify Google kernel source
@@ -173,17 +173,18 @@ jobs:
 
           content = path.read_text()
 
+          if '"nethunter_defconfig"' in content:
+              raise SystemExit(
+                  "nethunter_defconfig already registered"
+              )
+
           pattern = r'(?m)^(\s*)"shusky_defconfig",\s*$'
           matches = list(re.finditer(pattern, content))
 
           if len(matches) != 1:
               raise SystemExit(
-                  f"Expected one shusky_defconfig entry, found {len(matches)}"
-              )
-
-          if '"nethunter_defconfig"' in content:
-              raise SystemExit(
-                  "nethunter_defconfig already registered"
+                  f"Expected one shusky_defconfig entry, "
+                  f"found {len(matches)}"
               )
 
           match = matches[0]
@@ -283,12 +284,51 @@ jobs:
           grep -n -A15 -B3 cfg80211 \
             private/devices/google/zuma/constants.bzl
 
-          echo "=== Check whitespace in modified files ==="
+          echo "=== Check whitespace ==="
 
-          git -C private/devices/google/shusky diff --check
-          git -C private/devices/google/zuma diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
 
-          echo "Source modifications checked successfully."
+          files = [
+              Path("private/devices/google/shusky/BUILD.bazel"),
+              Path("private/devices/google/shusky/nethunter_defconfig"),
+              Path("private/devices/google/zuma/constants.bzl"),
+          ]
+
+          failed = False
+
+          for path in files:
+              data = path.read_bytes()
+
+              if not data.endswith(b"\n"):
+                  print(f"ERROR: Missing final newline: {path}")
+                  failed = True
+
+              for number, line in enumerate(
+                  data.decode().splitlines(), 1
+              ):
+                  if line.rstrip(" \t") != line:
+                      print(
+                          f"ERROR: Trailing whitespace: "
+                          f"{path}:{number}"
+                      )
+                      failed = True
+
+                  if line.startswith("<<<<<<< ") or \
+                     line.startswith("=======") or \
+                     line.startswith(">>>>>>> "):
+                      print(
+                          f"ERROR: Conflict marker: "
+                          f"{path}:{number}"
+                      )
+                      failed = True
+
+          if failed:
+              sys.exit(1)
+
+          print("Source whitespace checks passed.")
+          PY
 
       # ================================================
       # 9. Build official Shusky target
@@ -306,6 +346,8 @@ jobs:
           echo "Target: //private/devices/google/shusky:zuma_shusky_dist" \
             | tee -a build-report/build-status.txt
 
+          set -o pipefail
+
           ./private/devices/google/shusky/build_shusky.sh \
             --//build/kernel/kleaf:use_prebuilt_gki=false \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
@@ -313,7 +355,67 @@ jobs:
             2>&1 | tee build-report/build.log
 
       # ================================================
-      # 10. Verify final configuration
+      # 10. Collect diagnostics even after failure
+      # ================================================
+
+      - name: Collect diagnostics after build
+        if: always()
+        run: |
+          cd workspace
+
+          mkdir -p build-report/diagnostics
+          mkdir -p build-report/symbols
+
+          echo "=== Build output files ==="
+
+          if [ -d out/shusky ]; then
+            find out/shusky -type f \
+              \( -name 'Module.symvers' \
+              -o -name '*.stg' \
+              -o -name '*.symvers' \
+              -o -name '*abi*' \
+              -o -name '*kmi*' \
+              -o -name '.config' \) \
+              -print \
+              > build-report/diagnostics/files.txt
+          else
+            echo "out/shusky does not exist" \
+              > build-report/diagnostics/files.txt
+          fi
+
+          cat build-report/diagnostics/files.txt
+
+          echo "=== KMI errors ==="
+
+          if [ -f build-report/build.log ]; then
+            grep -n -A60 -B5 \
+              'kmi_symbol_list_violations' \
+              build-report/build.log || true
+
+            grep -n -A60 -B5 \
+              'missing from the symbol list' \
+              build-report/build.log || true
+          fi
+
+          echo "=== Module.symvers collection ==="
+
+          find out -type f -name Module.symvers \
+            -print 2>/dev/null \
+            > build-report/symbols/module-symvers-files.txt || true
+
+          while IFS= read -r symvers; do
+            [ -f "$symvers" ] || continue
+
+            name="$(echo "$symvers" | sed 's#/#_#g')"
+
+            cp "$symvers" \
+              "build-report/symbols/${name}"
+          done < build-report/symbols/module-symvers-files.txt
+
+          echo "Diagnostics collected."
+
+      # ================================================
+      # 11. Verify final kernel configuration
       # ================================================
 
       - name: Verify final kernel configuration
@@ -391,7 +493,7 @@ jobs:
           echo "Configuration checks passed."
 
       # ================================================
-      # 11. Verify Image and wireless modules
+      # 12. Verify Image and wireless modules
       # ================================================
 
       - name: Verify kernel image and modules
@@ -440,7 +542,7 @@ jobs:
           echo "All expected modules found."
 
       # ================================================
-      # 12. Collect module metadata
+      # 13. Collect module metadata
       # ================================================
 
       - name: Collect module metadata
@@ -483,36 +585,6 @@ jobs:
             printf '%s: ' "$(basename "$module")"
             modinfo -F vermagic "$module" || true
           done > build-report/vermagic-check.txt
-
-      # ================================================
-      # 13. Collect Module.symvers
-      # ================================================
-
-      - name: Collect symbol and ABI information
-        if: success()
-        run: |
-          cd workspace
-
-          mkdir -p build-report/symbols
-
-          find out -type f -name Module.symvers \
-            -print > build-report/symbols/module-symvers-files.txt
-
-          while IFS= read -r symvers; do
-            [ -n "$symvers" ] || continue
-
-            name="$(echo "$symvers" | sed 's#/#_#g')"
-
-            cp "$symvers" \
-              "build-report/symbols/${name}"
-
-          done < build-report/symbols/module-symvers-files.txt
-
-          find out/shusky -type f \
-            \( -iname '*abi*' -o -iname '*kmi*' -o -iname '*symvers*' \) \
-            -print > build-report/symbols/abi-files.txt || true
-
-          echo "Symbol and ABI collection completed."
 
       # ================================================
       # 14. Inspect vendor_dlkm outputs
@@ -586,7 +658,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shiba-twk-v1.33-verified-build
+          name: shiba-nethunter-diagnostic-build
           path: |
             workspace/out/shusky/dist/
             workspace/build-report/
