@@ -92,7 +92,9 @@ jobs:
           for file in \
             private/devices/google/shusky/BUILD.bazel \
             private/devices/google/zuma/constants.bzl \
-            private/devices/google/shusky/build_shusky.sh
+            private/devices/google/shusky/build_shusky.sh \
+            common/android/abi_gki_aarch64_pixel \
+            common/android/abi_gki_aarch64_fips140
           do
             test -f "$file" || {
               echo "MISSING: $file"
@@ -105,46 +107,42 @@ jobs:
           echo "=== Locate FIPS source files ==="
 
           FIPS_MODULE_SOURCE="$(find . \
-            -type f \
-            -name fips140-module.c \
+            -type f -name fips140-module.c \
             -not -path './.repo/*' \
             -print -quit)"
 
           FIPS_HMAC_SOURCE="$(find . \
-            -type f \
-            -name fips140_gen_hmac.c \
+            -type f -name fips140_gen_hmac.c \
             -not -path './.repo/*' \
             -print -quit)"
 
           POSTLINK_FILE="$(find . \
-            -type f \
-            -name Makefile.postlink \
+            -type f -name Makefile.postlink \
             -not -path './.repo/*' \
             -print -quit)"
 
-          if [ -z "$FIPS_MODULE_SOURCE" ]; then
+          test -n "$FIPS_MODULE_SOURCE" || {
             echo "ERROR: fips140-module.c not found."
             exit 1
-          fi
+          }
 
-          if [ -z "$FIPS_HMAC_SOURCE" ]; then
+          test -n "$FIPS_HMAC_SOURCE" || {
             echo "ERROR: fips140_gen_hmac.c not found."
             exit 1
-          fi
+          }
 
-          if [ -z "$POSTLINK_FILE" ]; then
-            echo "ERROR: ARM64 Makefile.postlink not found."
+          test -n "$POSTLINK_FILE" || {
+            echo "ERROR: Makefile.postlink not found."
             find . -type f -name '*postlink*' \
               -not -path './.repo/*' -print
             exit 1
-          fi
+          }
 
           echo "FIPS module source: $FIPS_MODULE_SOURCE"
           echo "FIPS HMAC source: $FIPS_HMAC_SOURCE"
           echo "Postlink file: $POSTLINK_FILE"
 
-          echo "$POSTLINK_FILE" \
-            > fips-postlink-path.txt
+          echo "$POSTLINK_FILE" > fips-postlink-path.txt
 
           echo
           echo "=== Verify HMAC postlink implementation ==="
@@ -153,20 +151,14 @@ jobs:
             'cmd_gen_hmac\|fips140.ko\|fips140_gen_hmac' \
             "$POSTLINK_FILE"
 
-          grep -q 'fips140_gen_hmac' "$POSTLINK_FILE" || {
-            echo "ERROR: HMAC generator not referenced by postlink."
-            exit 1
-          }
-
-          grep -q 'fips140.ko' "$POSTLINK_FILE" || {
-            echo "ERROR: FIPS module target not found in postlink."
-            exit 1
-          }
+          grep -q 'fips140_gen_hmac' "$POSTLINK_FILE"
+          grep -q 'fips140.ko' "$POSTLINK_FILE"
 
           echo
-          echo "=== Pixel ABI reference ==="
+          echo "=== Existing Shusky KMI configuration ==="
 
-          grep -n -A5 -B5 'kmi_symbol_list' \
+          grep -n -A5 -B5 \
+            'kmi_symbol_list' \
             private/devices/google/shusky/BUILD.bazel || true
 
           echo
@@ -191,7 +183,6 @@ jobs:
           CONFIG_MAC80211=m
           CONFIG_USB=y
 
-          # Experimental FIPS 140 cryptographic module
           CONFIG_CRYPTO_FIPS140_MOD=m
           # CONFIG_MODULE_SIG_ALL is not set
           EOF
@@ -209,7 +200,7 @@ jobs:
             exit 1
           fi
 
-      - name: Register FIPS test defconfig and module output
+      - name: Register FIPS Bazel configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -222,6 +213,7 @@ jobs:
           path = Path("private/devices/google/shusky/BUILD.bazel")
           content = path.read_text()
 
+          # 1. Register the custom defconfig.
           if '"nethunter_defconfig"' in content:
               raise SystemExit(
                   "ERROR: nethunter_defconfig already registered"
@@ -232,7 +224,8 @@ jobs:
 
           if len(matches) != 1:
               raise SystemExit(
-                  f"Expected one shusky_defconfig entry; found {len(matches)}"
+                  "ERROR: Expected exactly one shusky_defconfig entry; "
+                  f"found {len(matches)}"
               )
 
           match = matches[0]
@@ -249,6 +242,43 @@ jobs:
               + content[match.end():]
           )
 
+          # 2. Preserve Pixel ABI and add FIPS ABI as an additional list.
+          pixel_pattern = (
+              r'(?m)^(\s*)kmi_symbol_list\s*=\s*'
+              r'"//common:android/abi_gki_aarch64_pixel",\s*$'
+          )
+
+          pixel_matches = list(re.finditer(pixel_pattern, content))
+
+          if len(pixel_matches) != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one Pixel ABI declaration; "
+                  f"found {len(pixel_matches)}"
+              )
+
+          if "additional_kmi_symbol_lists" in content:
+              raise SystemExit(
+                  "ERROR: additional_kmi_symbol_lists already exists. "
+                  "Inspect BUILD.bazel before continuing."
+              )
+
+          match = pixel_matches[0]
+          indent = match.group(1)
+
+          replacement = (
+              f'{match.group(0)}\n'
+              f'{indent}additional_kmi_symbol_lists = [\n'
+              f'{indent}    "//common:android/abi_gki_aarch64_fips140",\n'
+              f'{indent}],'
+          )
+
+          content = (
+              content[:match.start()]
+              + replacement
+              + content[match.end():]
+          )
+
+          # 3. Add the FIPS module to the Shusky module outputs.
           module_pattern = (
               r'(?m)^(\s*)module_outs\s*=\s*'
               r'ZUMA_MODULE_OUTS\s*,\s*$'
@@ -263,29 +293,38 @@ jobs:
                   f"found {len(module_matches)}"
               )
 
-          module_match = module_matches[0]
-          module_indent = module_match.group(1)
+          match = module_matches[0]
+          indent = match.group(1)
 
-          module_replacement = (
-              f'{module_indent}module_outs = '
+          replacement = (
+              f'{indent}module_outs = '
               'ZUMA_MODULE_OUTS + ["crypto/fips140.ko"],'
           )
 
           content = (
-              content[:module_match.start()]
-              + module_replacement
-              + content[module_match.end():]
+              content[:match.start()]
+              + replacement
+              + content[match.end():]
           )
 
           path.write_text(content)
 
-          print("FIPS test defconfig registered.")
-          print("crypto/fips140.ko added to Shusky module outputs.")
+          print("OK: nethunter_defconfig registered.")
+          print("OK: Pixel ABI retained.")
+          print("OK: FIPS ABI added as additional KMI list.")
+          print("OK: crypto/fips140.ko added to module_outs.")
           PY
 
+          echo
           echo "=== Defconfig registration ==="
           grep -n -A5 -B3 \
-            nethunter_defconfig \
+            'nethunter_defconfig' \
+            private/devices/google/shusky/BUILD.bazel
+
+          echo
+          echo "=== KMI ABI registration ==="
+          grep -n -A8 -B3 \
+            'kmi_symbol_list' \
             private/devices/google/shusky/BUILD.bazel
 
           echo
@@ -294,19 +333,35 @@ jobs:
             'crypto/fips140.ko' \
             private/devices/google/shusky/BUILD.bazel
 
-      - name: Validate source modifications
+      - name: Validate Bazel and source modifications
         shell: bash
         run: |
           set -euo pipefail
           cd workspace
 
+          BUILD_FILE="private/devices/google/shusky/BUILD.bazel"
+          DEFCONFIG="private/devices/google/shusky/nethunter_defconfig"
+
+          grep -Fq \
+            '"nethunter_defconfig"' "$BUILD_FILE"
+
+          grep -Fq \
+            'kmi_symbol_list = "//common:android/abi_gki_aarch64_pixel"' \
+            "$BUILD_FILE"
+
+          grep -Fq \
+            '"//common:android/abi_gki_aarch64_fips140"' \
+            "$BUILD_FILE"
+
           grep -Fq \
             'ZUMA_MODULE_OUTS + ["crypto/fips140.ko"]' \
-            private/devices/google/shusky/BUILD.bazel
+            "$BUILD_FILE"
 
           grep -qx \
-            'CONFIG_CRYPTO_FIPS140_MOD=m' \
-            private/devices/google/shusky/nethunter_defconfig
+            'CONFIG_CRYPTO_FIPS140_MOD=m' "$DEFCONFIG"
+
+          grep -q \
+            'additional_kmi_symbol_lists' "$BUILD_FILE"
 
           python3 - <<'PY'
           from pathlib import Path
@@ -326,20 +381,34 @@ jobs:
                   print(f"ERROR: Missing final newline: {path}")
                   failed = True
 
-              for number, line in enumerate(data.decode().splitlines(), 1):
+              for number, line in enumerate(
+                  data.decode().splitlines(), 1
+              ):
                   if line.rstrip(" \t") != line:
-                      print(f"ERROR: Trailing whitespace: {path}:{number}")
+                      print(
+                          f"ERROR: Trailing whitespace: "
+                          f"{path}:{number}"
+                      )
                       failed = True
 
-                  if line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")):
-                      print(f"ERROR: Conflict marker: {path}:{number}")
+                  if line.startswith(
+                      ("<<<<<<< ", "=======", ">>>>>>> ")
+                  ):
+                      print(
+                          f"ERROR: Conflict marker: "
+                          f"{path}:{number}"
+                      )
                       failed = True
 
           if failed:
               sys.exit(1)
 
-          print("Source validation passed.")
+          print("Bazel and source validation passed.")
           PY
+
+          echo
+          echo "=== Final Bazel changes ==="
+          git diff -- private/devices/google/shusky/BUILD.bazel
 
       - name: Build Shusky FIPS test kernel
         shell: bash
@@ -358,9 +427,11 @@ jobs:
             echo "Build type: SAFE BASELINE + FIPS BUILD TEST"
             echo "RTL8187: EXCLUDED"
             echo "MT76: EXCLUDED"
-            echo "Strict Pixel KMI: ENABLED"
+            echo "Pixel ABI: ENABLED"
+            echo "Additional FIPS ABI: ENABLED"
+            echo "Strict KMI enforcement: NOT DISABLED"
             echo "KernelSU inline: DISABLED"
-            echo "FIPS crypto module: ENABLED AS BUILD OUTPUT"
+            echo "FIPS crypto module: BUILD OUTPUT"
             echo "FIPS HMAC postlink: SOURCE VERIFIED"
             echo "Flash operations: NONE"
           } | tee build-report/build-status.txt
@@ -391,8 +462,6 @@ jobs:
               > build-report/diagnostics/dist-files.txt
           fi
 
-          echo "=== Relevant build errors ==="
-
           if [ -f build-report/build.log ]; then
             grep -n -A60 -B5 \
               'kmi_symbol_list_violations' \
@@ -403,9 +472,9 @@ jobs:
               build-report/build.log || true
 
             grep -n -i -E \
-              'error:|failed|fatal|HMAC|fips140' \
+              'error:|failed|fatal|HMAC|fips140|KMI' \
               build-report/build.log \
-              | tail -n 250 || true
+              | tail -n 300 || true
           fi
 
           find . -type f \
@@ -414,9 +483,6 @@ jobs:
             -not -path '*/.repo/*' \
             -print \
             > build-report/symbols/module-symvers-files.txt
-
-          echo "=== Module.symvers files ==="
-          cat build-report/symbols/module-symvers-files.txt
 
           find out common -type f \
             \( \
@@ -428,9 +494,6 @@ jobs:
             -not -path '*/.repo/*' \
             -print 2>/dev/null \
             > build-report/diagnostics/abi-files.txt
-
-          echo "=== ABI files ==="
-          cat build-report/diagnostics/abi-files.txt
 
       - name: Analyze exported symbols and ABI
         if: always()
@@ -444,12 +507,10 @@ jobs:
           REPORT="build-report/symbol-analysis"
           MANIFEST="build-report/symbols/module-symvers-files.txt"
 
-          SYMBOLS='__dev_kfree_skb_irq|__ioread32_copy|__iowrite32_copy|dev_set_threaded|of_get_mac_address|pci_disable_link_state|pcie_capability_clear_and_set_word|radix_tree_tagged|rfkill_pause_polling|sched_set_fifo_low|skb_to_sgvec|skb_unlink|usb_alloc_urb|usb_anchor_urb|usb_bulk_msg|usb_control_msg|usb_deregister|usb_free_urb|usb_get_dev|usb_init_urb|usb_kill_anchored_urbs|usb_kill_urb|usb_poison_urb|usb_put_dev|usb_register_driver|usb_reset_device|usb_submit_urb|usb_unanchor_urb|usb_unpoison_urb|__traceiter_android_vh_sha256|__traceiter_android_vh_aes_expandkey|__traceiter_android_vh_aes_encrypt|__traceiter_android_vh_aes_decrypt|__tracepoint_android_vh_sha256|__tracepoint_android_vh_aes_expandkey|__tracepoint_android_vh_aes_encrypt|__tracepoint_android_vh_aes_decrypt'
+          SYMBOLS='__dev_kfree_skb_irq|__ioread32_copy|__iowrite32_copy|dev_set_threaded|of_get_mac_address|pci_disable_link_state|pcie_capability_clear_and_set_word|radix_tree_tagged|rfkill_pause_polling|sched_set_fifo_low|skb_to_sgvec|skb_unlink|usb_alloc_urb|usb_anchor_urb|usb_bulk_msg|usb_control_msg|usb_deregister|usb_free_urb|usb_get_dev|usb_init_urb|usb_kill_anchored_urbs|usb_kill_urb|usb_poison_urb|usb_put_dev|usb_register_driver|usb_reset_device|usb_submit_urb|usb_unanchor_urb|usb_unpoison_urb|__traceiter_android_vh_sha256|__traceiter_android_vh_aes_expandkey|__traceiter_android_vh_aes_encrypt|__traceiter_android_vh_aes_decrypt|__tracepoint_android_vh_sha256|__tracepoint_android_vh_aes_expandkey|__tracepoint_android_vh_aes_encrypt|__tracepoint_android_vh_aes_decrypt|aead_register_instance|ahash_register_instance|cpu_have_feature|crypto_ahash_finup|crypto_ahash_setkey|crypto_alg_list|crypto_alg_sem|crypto_alloc_rng|crypto_attr_alg_name|crypto_check_attr_type|crypto_cipher_encrypt_one|crypto_cipher_setkey|crypto_drop_spawn|crypto_get_default_null_skcipher|crypto_grab_aead|crypto_grab_ahash|crypto_grab_shash|crypto_grab_skcipher|crypto_grab_spawn|crypto_inst_setname|crypto_put_default_null_skcipher|crypto_register_aead|crypto_register_aeads|crypto_register_ahash|crypto_register_ahashes|crypto_register_alg|crypto_register_algs|crypto_register_rng|crypto_register_rngs|crypto_register_shashes|crypto_register_skcipher|crypto_register_skciphers|crypto_register_template|crypto_register_templates|crypto_remove_spawns|crypto_rng_reset|crypto_shash_alg_has_setkey|crypto_shash_tfm_digest|crypto_spawn_tfm|crypto_spawn_tfm2|crypto_unregister_aead|crypto_unregister_alg|crypto_unregister_rng|crypto_unregister_rngs|crypto_unregister_shashes|crypto_unregister_skciphers|crypto_unregister_template|crypto_unregister_templates|fpsimd_context_busy|irq_stat|kernel_neon_begin|kernel_neon_end|rng_is_initialized|scatterwalk_ffwd|scatterwalk_map_and_copy|shash_free_singlespawn_instance|shash_register_instance|skcipher_alloc_instance_simple|skcipher_register_instance|skcipher_walk_aead_decrypt|skcipher_walk_aead_encrypt|skcipher_walk_done|skcipher_walk_virt'
 
           : > "$REPORT/module-symbols.txt"
           : > "$REPORT/abi-symbols.txt"
-
-          echo "=== Module.symvers analysis ==="
 
           if [ -s "$MANIFEST" ]; then
             while IFS= read -r file; do
@@ -459,7 +520,6 @@ jobs:
               {
                 echo
                 echo "===== $file ====="
-
                 grep -nE \
                   "^[^[:space:]]+[[:space:]]+(${SYMBOLS})[[:space:]]" \
                   "$file" || true
@@ -479,7 +539,6 @@ jobs:
               {
                 echo
                 echo "===== $file ====="
-
                 grep -nE \
                   "^(${SYMBOLS})([[:space:]]|$)" \
                   "$file" || true
@@ -507,15 +566,13 @@ jobs:
 
           while IFS= read -r candidate; do
             if grep -qx \
-              'CONFIG_CRYPTO_FIPS140_MOD=m' \
-              "$candidate"; then
+              'CONFIG_CRYPTO_FIPS140_MOD=m' "$candidate"; then
               CONFIG="$candidate"
               break
             fi
           done < <(
             find out/shusky -type f \
-              -name .config \
-              -print 2>/dev/null
+              -name .config -print 2>/dev/null
           )
 
           if [ -z "$CONFIG" ]; then
@@ -558,10 +615,10 @@ jobs:
             option="$1"
             expected="$2"
 
-            if ! grep -qx "${option}=${expected}" "$CONFIG"; then
+            grep -qx "${option}=${expected}" "$CONFIG" || {
               echo "ERROR: ${option} is not ${expected}"
               exit 1
-            fi
+            }
           }
 
           check_config CONFIG_MODULES y
@@ -576,8 +633,7 @@ jobs:
           check_config CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS y
 
           if grep -Eq \
-            '^CONFIG_(RTL8187|MT76[^=]*)=(y|m)$' \
-            "$CONFIG"; then
+            '^CONFIG_(RTL8187|MT76[^=]*)=(y|m)$' "$CONFIG"; then
             echo "ERROR: RTL8187 or MT76 unexpectedly enabled."
             exit 1
           fi
@@ -605,8 +661,6 @@ jobs:
 
           mkdir -p build-report/fips
 
-          echo "=== Find FIPS module ==="
-
           FIPS_MODULE="$(find out -type f \
             -path '*/crypto/fips140.ko' \
             -print -quit)"
@@ -620,19 +674,13 @@ jobs:
           echo "Found: $FIPS_MODULE"
           cp "$FIPS_MODULE" build-report/fips/fips140.ko
 
-          echo
-          echo "=== Module metadata ==="
           modinfo build-report/fips/fips140.ko \
             | tee build-report/fips/modinfo.txt
 
-          echo
-          echo "=== Module vermagic ==="
           modinfo -F vermagic \
             build-report/fips/fips140.ko \
             | tee build-report/fips/vermagic.txt
 
-          echo
-          echo "=== ELF section verification ==="
           readelf -SW build-report/fips/fips140.ko \
             | tee build-report/fips/sections.txt
 
@@ -647,9 +695,6 @@ jobs:
               echo "ERROR: .init.rela.rodata missing."
               exit 1
             }
-
-          echo
-          echo "=== HMAC postlink evidence ==="
 
           POSTLINK_FILE="$(cat fips-postlink-path.txt)"
 
@@ -680,12 +725,9 @@ jobs:
               "$POSTLINK_FILE" || true
           } | tee build-report/fips/hmac-postlink.txt
 
-          echo
-          echo "=== FIPS module SHA256 ==="
           sha256sum build-report/fips/fips140.ko \
             | tee build-report/fips/sha256.txt
 
-          echo
           echo "ELF relocation section checks passed."
           echo "HMAC execution evidence collected for review."
 
@@ -698,21 +740,21 @@ jobs:
 
           DIST="out/shusky/dist"
 
-          if [ ! -d "$DIST" ]; then
+          test -d "$DIST" || {
             echo "ERROR: Expected dist directory not found."
             find out/shusky -maxdepth 4 -type f -print || true
             exit 1
-          fi
+          }
 
           IMAGE="$(find "$DIST" -type f \
             \( -name Image.lz4 -o -name Image \) \
             -print -quit)"
 
-          if [ -z "$IMAGE" ]; then
+          test -n "$IMAGE" || {
             echo "ERROR: No Image or Image.lz4 found."
             find "$DIST" -maxdepth 4 -type f -print
             exit 1
-          fi
+          }
 
           file "$IMAGE"
           sha256sum "$IMAGE"
@@ -823,9 +865,7 @@ jobs:
             sha256sum "$image"
           done < build-report/vendor_dlkm/files.txt
 
-          echo
           echo "Image inventory collected."
-          echo "This step does not claim FIPS is absent from the images."
           echo "No image is flashed or installed."
 
       - name: Create build report
@@ -848,7 +888,7 @@ jobs:
             echo
             echo "=== Build result ==="
             if [ -f build-report/build.log ]; then
-              echo "Check GitHub Actions job result for the authoritative build status."
+              echo "Check GitHub Actions job result for authoritative build status."
             else
               echo "Build log not found."
             fi
