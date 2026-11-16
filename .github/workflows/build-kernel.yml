@@ -1,4 +1,4 @@
-name: Diagnose ABI Paths and Bazel Labels
+name: Diagnose Bazel Exports and ABI Paths
 
 on:
   workflow_dispatch:
@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  diagnose-paths:
-    name: Diagnose Bazel and ABI paths
+  diagnose-bazel:
+    name: Diagnose Bazel exports and ABI paths
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -76,41 +76,34 @@ jobs:
       # ================================================
       # DIAGNOSTISCHE STAP (EXACT ZOALS DE EXPERT VROEG)
       # ================================================
-      - name: Verify ABI paths and Bazel labels
+      - name: Inspect common Bazel package
         shell: bash
         run: |
           set -uo pipefail
-
           ROOT="$GITHUB_WORKSPACE/workspace"
 
-          echo "=== COMMON DIRECTORY ==="
-          ls -lad "$ROOT/common" "$ROOT/aosp"
-          ls -la "$ROOT/common" | head -30
+          echo "=== COMMON BUILD SYMLINK ==="
+          readlink -f "$ROOT/common/BUILD.bazel" || true
 
           echo
-          echo "=== SHUSKY KMI LABELS ==="
-          grep -n -B5 -A12 \
-            'kmi_symbol_list\|additional_kmi_symbol_lists' \
-            "$ROOT/private/devices/google/shusky/BUILD.bazel" || true
+          echo "=== COMMON BUILD CONTENT ==="
+          sed -n '1,240p' \
+            "$ROOT/private/devices/google/common/kleaf/common.BUILD.bazel" || true
 
           echo
-          echo "=== ABI FILES ==="
-          ls -lh \
-            "$ROOT/aosp/android/abi_gki_aarch64_pixel" \
-            "$ROOT/aosp/android/abi_gki_aarch64_fips140"
+          echo "=== COMMON DIRECTORY CONTENTS ==="
+          find "$ROOT/common" -maxdepth 3 \( -type f -o -type l \) || true
 
           echo
-          echo "=== BAZEL WORKSPACE REFERENCES ==="
-          grep -RniE \
-            'abi_gki_aarch64_pixel|abi_gki_aarch64_fips140|local_repository|repo_mapping' \
-            "$ROOT/private/devices/google/shusky" \
-            "$ROOT/private/devices/google/common" \
-            --include='*.bzl' --include='BUILD*' --include='MODULE.bazel' \
-            --include='WORKSPACE*' 2>/dev/null | head -100
+          echo "=== ABI EXPORT REFERENCES ==="
+          grep -n -B5 -A10 \
+            'exports_files\|abi_gki\|glob(' \
+            "$ROOT/private/devices/google/common/kleaf/common.BUILD.bazel" \
+            || true
 
           echo
-          echo "=== DIAGNOSTICS COMPLETE ==="
+          echo "=== COMPLETE ==="
           
-          # Stop de workflow hier. We willen nog geen kernel bouwen.
+          # Stop de workflow hier, we willen nog geen kernel bouwen.
           exit 1
       # ================================================
