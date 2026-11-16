@@ -1,4 +1,5 @@
-name: Diagnose AOSP ABI Exports
+
+name: Build Pixel 8 Shiba - NetHunter Native FIPS Test
 
 on:
   workflow_dispatch:
@@ -9,11 +10,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: shiba-nethunter-kernel-build
+  cancel-in-progress: false
+
 jobs:
-  diagnose-abi:
-    name: Verify AOSP ABI package exports
+  build-kernel:
+    name: Build and verify Shiba native FIPS kernel
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
+
+    env:
+      DEVICE: shiba
+      KERNEL_DEVICE: shusky
+      CUSTOM_KERNEL_VERSION: "1.33"
 
     steps:
       - name: Free runner disk space
@@ -54,6 +64,7 @@ jobs:
           set -euo pipefail
           mkdir -p workspace
           cd workspace
+
           repo init \
             --depth=1 \
             -u https://android.googlesource.com/kernel/manifest \
@@ -65,6 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           cd workspace
+
           repo sync \
             --current-branch \
             --no-tags \
@@ -73,31 +85,719 @@ jobs:
             -j2 \
             --fail-fast
 
-      - name: Verify AOSP ABI package exports
+      - name: Verify native FIPS source and ABI files
         shell: bash
         run: |
-          set -uo pipefail
-          ROOT="$GITHUB_WORKSPACE/workspace"
+          set -euo pipefail
+          cd workspace
 
-          echo "=== AOSP BUILD FILES ==="
-          find "$ROOT/aosp" -maxdepth 2 \
-            \( -name BUILD -o -name BUILD.bazel \) -print
+          echo "=== Required build files ==="
+
+          for file in \
+            private/devices/google/shusky/BUILD.bazel \
+            private/devices/google/shusky/build_shusky.sh \
+            private/devices/google/zuma/BUILD.bazel \
+            common/crypto/Kconfig \
+            common/crypto/Makefile \
+            common/arch/arm64/Makefile.postlink \
+            common/android/abi_gki_aarch64_pixel \
+            common/android/abi_gki_aarch64_fips140
+          do
+            test -f "$file" || {
+              echo "ERROR: Missing $file"
+              exit 1
+            }
+            echo "FOUND: $file"
+          done
 
           echo
-          echo "=== AOSP ABI EXPORTS ==="
-          grep -Rni -B5 -A12 \
-            'abi_gki_aarch64_pixel\|abi_gki_aarch64_fips140\|exports_files' \
-            "$ROOT/aosp/BUILD" \
-            "$ROOT/aosp/BUILD.bazel" \
-            "$ROOT/aosp/android" \
-            2>/dev/null | head -160
+          echo "=== Native FIPS source ==="
+
+          test -f common/crypto/fips140-module.c
+          test -f common/crypto/fips140_gen_hmac.c
+
+          echo "FIPS module source found."
+          echo "FIPS HMAC generator source found."
 
           echo
-          echo "=== FIPS FILE ==="
-          test -f "$ROOT/aosp/android/abi_gki_aarch64_fips140" \
-            && echo "FIPS ABI FILE EXISTS" \
-            || echo "FIPS ABI FILE MISSING"
+          echo "=== FIPS Kconfig and Makefile ==="
+
+          grep -n -A12 -B3 'CRYPTO_FIPS140_MOD' \
+            common/crypto/Kconfig
+
+          grep -n -A12 -B3 'fips140' \
+            common/crypto/Makefile
 
           echo
-          echo "=== DIAGNOSTICS COMPLETE ==="
-          exit 1
+          echo "=== FIPS HMAC postlink ==="
+
+          grep -n -A25 -B5 \
+            'cmd_gen_hmac\|fips140.ko\|fips140_gen_hmac' \
+            common/arch/arm64/Makefile.postlink
+
+          grep -q 'fips140_gen_hmac' \
+            common/arch/arm64/Makefile.postlink
+
+          grep -q 'fips140.ko' \
+            common/arch/arm64/Makefile.postlink
+
+          echo
+          echo "=== ABI files ==="
+
+          wc -l \
+            common/android/abi_gki_aarch64_pixel \
+            common/android/abi_gki_aarch64_fips140
+
+      - name: Apply native FIPS Shusky integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          shusky = Path("private/devices/google/shusky")
+          build = shusky / "BUILD.bazel"
+
+          content = build.read_text()
+
+          # 1. Add the dedicated FIPS defconfig fragment.
+          fragment_entry = '"nethunter_fips_defconfig"'
+
+          if fragment_entry not in content:
+              pattern = r'(?m)^(\s*)"shusky_defconfig",\s*$'
+              matches = list(re.finditer(pattern, content))
+
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"Expected one shusky_defconfig entry; "
+                      f"found {len(matches)}"
+                  )
+
+              match = matches[0]
+              indent = match.group(1)
+
+              replacement = (
+                  match.group(0)
+                  + "\n"
+                  + indent
+                  + fragment_entry
+                  + ","
+              )
+
+              content = (
+                  content[:match.start()]
+                  + replacement
+                  + content[match.end():]
+              )
+
+          # 2. Keep strict Pixel ABI and add the FIPS ABI list.
+          pixel_pattern = (
+              r'(?m)^(\s*)kmi_symbol_list\s*=\s*'
+              r'"//common:android/abi_gki_aarch64_pixel",\s*$'
+          )
+
+          pixel_matches = list(re.finditer(pixel_pattern, content))
+
+          if len(pixel_matches) != 1:
+              raise SystemExit(
+                  "Expected exactly one strict Pixel KMI declaration."
+              )
+
+          if "additional_kmi_symbol_lists" not in content:
+              match = pixel_matches[0]
+              indent = match.group(1)
+
+              replacement = (
+                  match.group(0)
+                  + "\n"
+                  + indent
+                  + "additional_kmi_symbol_lists = [\n"
+                  + indent
+                  + '    "//common:android/abi_gki_aarch64_fips140",\n'
+                  + indent
+                  + "],"
+              )
+
+              content = (
+                  content[:match.start()]
+                  + replacement
+                  + content[match.end():]
+              )
+          else:
+              if (
+                  '"//common:android/abi_gki_aarch64_fips140"'
+                  not in content
+              ):
+                  raise SystemExit(
+                      "Existing additional KMI list does not contain "
+                      "the FIPS ABI list."
+                  )
+
+          # 3. Include the native in-tree FIPS module in module outputs.
+          module_pattern = (
+              r'(?m)^(\s*)module_outs\s*=\s*ZUMA_MODULE_OUTS\s*,\s*$'
+          )
+
+          module_matches = list(re.finditer(module_pattern, content))
+
+          if len(module_matches) == 1:
+              match = module_matches[0]
+              indent = match.group(1)
+
+              replacement = (
+                  indent
+                  + 'module_outs = ZUMA_MODULE_OUTS + '
+                  + '["crypto/fips140.ko"],'
+              )
+
+              content = (
+                  content[:match.start()]
+                  + replacement
+                  + content[match.end():]
+              )
+          elif len(module_matches) == 0:
+              if 'module_outs = ZUMA_MODULE_OUTS + ["crypto/fips140.ko"]' not in content:
+                  raise SystemExit(
+                      "Cannot safely identify Shusky module_outs."
+                  )
+          else:
+              raise SystemExit(
+                  "Multiple module_outs declarations found."
+              )
+
+          # 4. Put the FIPS ramdisk list before Zuma's module list.
+          ramdisk_pattern = (
+              r'(?s)(create_file\(\s*'
+              r'name\s*=\s*"vendor_ramdisk_modules_list",'
+              r'\s*srcs\s*=\s*\[\s*)'
+              r'(.*?)'
+              r'(\s*\],\s*out\s*=\s*"vendor_ramdisk.modules",)'
+          )
+
+          ramdisk_matches = list(
+              re.finditer(ramdisk_pattern, content)
+          )
+
+          if len(ramdisk_matches) != 1:
+              raise SystemExit(
+                  "Cannot safely identify vendor ramdisk module list."
+              )
+
+          match = ramdisk_matches[0]
+          srcs = match.group(2)
+
+          fips_entry = '"vendor_ramdisk.modules.fips140"'
+
+          if fips_entry not in srcs:
+              srcs = (
+                  '\n        # FIPS must load before other modules.\n'
+                  '        "vendor_ramdisk.modules.fips140",'
+                  + srcs
+              )
+
+          content = (
+              content[:match.start(2)]
+              + srcs
+              + content[match.end(2):]
+          )
+
+          build.write_text(content)
+
+          # 5. Dedicated FIPS defconfig. Do not alter module signing.
+          (shusky / "nethunter_fips_defconfig").write_text(
+              "CONFIG_CRYPTO_FIPS140_MOD=m\n"
+          )
+
+          # 6. First entry in the ramdisk module list.
+          (shusky / "vendor_ramdisk.modules.fips140").write_text(
+              "kernel/crypto/fips140.ko\n"
+          )
+
+          print("Native FIPS integration applied.")
+          print("Pixel KMI remains enabled.")
+          print("FIPS ABI list remains enabled.")
+          print("FIPS module output registered.")
+          print("FIPS ramdisk entry placed first.")
+          PY
+
+          echo
+          echo "=== Verify integration ==="
+
+          grep -n -A8 -B3 \
+            'nethunter_fips_defconfig\|additional_kmi_symbol_lists\|module_outs\|vendor_ramdisk.modules.fips140' \
+            private/devices/google/shusky/BUILD.bazel
+
+          echo
+          cat private/devices/google/shusky/nethunter_fips_defconfig
+
+          echo
+          cat private/devices/google/shusky/vendor_ramdisk.modules.fips140
+
+      - name: Verify integration before build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          BUILD="private/devices/google/shusky/BUILD.bazel"
+
+          grep -q 'nethunter_fips_defconfig' "$BUILD"
+          grep -q 'abi_gki_aarch64_pixel' "$BUILD"
+          grep -q 'abi_gki_aarch64_fips140' "$BUILD"
+          grep -q 'crypto/fips140.ko' "$BUILD"
+          grep -q 'vendor_ramdisk.modules.fips140' "$BUILD"
+
+          grep -qx 'CONFIG_CRYPTO_FIPS140_MOD=m' \
+            private/devices/google/shusky/nethunter_fips_defconfig
+
+          grep -qx 'kernel/crypto/fips140.ko' \
+            private/devices/google/shusky/vendor_ramdisk.modules.fips140
+
+          if grep -Eq \
+            '^CONFIG_(RTL8187|MT76[^=]*)=(y|m)$' \
+            private/devices/google/shusky/nethunter_fips_defconfig
+          then
+            echo "ERROR: Excluded wireless driver enabled."
+            exit 1
+          fi
+
+          echo "Pre-build integration checks passed."
+
+      - name: Build Shusky native FIPS kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          mkdir -p build-report
+
+          {
+            echo "Build started: $(date -u)"
+            echo "Target: //private/devices/google/shusky:zuma_shusky_dist"
+            echo "Build type: Native FIPS integration test"
+            echo "Pixel KMI: strict"
+            echo "FIPS ABI: enabled"
+            echo "FIPS module: native in-tree"
+            echo "FIPS HMAC postlink: required"
+            echo "KernelSU Inline: disabled"
+            echo "RTL8187: excluded"
+            echo "MT76: excluded"
+            echo "Phone flash: disabled"
+          } | tee build-report/build-status.txt
+
+          ./private/devices/google/shusky/build_shusky.sh \
+            --kernel_package=@//aosp \
+            --//build/kernel/kleaf:use_prebuilt_gki=false \
+            --no//private/devices/google/common:download_prebuilt_gki_fips140 \
+            --verbose_failures \
+            2>&1 | tee build-report/build.log
+
+          echo "BUILD SUCCESSFUL" | tee -a build-report/build-status.txt
+
+      - name: Verify final kernel configuration
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          mkdir -p build-report
+
+          CONFIG=""
+
+          while IFS= read -r candidate; do
+            if grep -qx 'CONFIG_CRYPTO_FIPS140_MOD=m' "$candidate"; then
+              CONFIG="$candidate"
+              break
+            fi
+          done < <(
+            find out/shusky -type f -name .config -print
+          )
+
+          if [ -z "$CONFIG" ]; then
+            echo "ERROR: No final Shusky config with FIPS enabled."
+            exit 1
+          fi
+
+          cp "$CONFIG" build-report/final.config
+
+          check_config() {
+            option="$1"
+            expected="$2"
+
+            grep -qx "${option}=${expected}" "$CONFIG" || {
+              echo "ERROR: ${option} is not ${expected}"
+              exit 1
+            }
+          }
+
+          check_config CONFIG_MODULES y
+          check_config CONFIG_MODVERSIONS y
+          check_config CONFIG_ANDROID_VENDOR_HOOKS y
+          check_config CONFIG_ARM64_MODULE_PLTS y
+          check_config CONFIG_WLAN y
+          check_config CONFIG_CFG80211 m
+          check_config CONFIG_MAC80211 m
+          check_config CONFIG_USB y
+          check_config CONFIG_CRYPTO_FIPS140_MOD m
+          check_config CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS y
+
+          if grep -Eq '^CONFIG_(RTL8187|MT76[^=]*)=(y|m)$' "$CONFIG"; then
+            echo "ERROR: Excluded wireless drivers enabled."
+            exit 1
+          fi
+
+          if grep -Eq '^CONFIG_KSU=(y|m)$' "$CONFIG"; then
+            echo "ERROR: KernelSU unexpectedly built in."
+            exit 1
+          fi
+
+          if grep -Eq \
+            '^CONFIG_CRYPTO_FIPS140_MOD_EVAL_TESTING=(y|m)$' \
+            "$CONFIG"
+          then
+            echo "ERROR: FIPS evaluation testing unexpectedly enabled."
+            exit 1
+          fi
+
+          echo "Final kernel configuration verified." \
+            | tee build-report/config-check.txt
+
+      - name: Verify native FIPS module and HMAC postlink
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          mkdir -p build-report/fips
+
+          FIPS_MODULE="$(
+            find out/shusky -type f \
+              -path '*/crypto/fips140.ko' \
+              -print -quit
+          )"
+
+          if [ -z "$FIPS_MODULE" ]; then
+            echo "ERROR: Native crypto/fips140.ko not found."
+            exit 1
+          fi
+
+          cp "$FIPS_MODULE" build-report/fips/fips140.ko
+
+          modinfo build-report/fips/fips140.ko \
+            | tee build-report/fips/modinfo.txt
+
+          modinfo -F vermagic build-report/fips/fips140.ko \
+            | tee build-report/fips/vermagic.txt
+
+          readelf -SW build-report/fips/fips140.ko \
+            | tee build-report/fips/sections.txt
+
+          grep -q '\.init\.rela\.text' \
+            build-report/fips/sections.txt
+
+          grep -q '\.init\.rela\.rodata' \
+            build-report/fips/sections.txt
+
+          POSTLINK="common/arch/arm64/Makefile.postlink"
+
+          {
+            echo "=== HMAC generator in build log ==="
+            grep -n -i -E \
+              'fips140_gen_hmac|gen_hmac' \
+              build-report/build.log || true
+
+            echo
+            echo "=== Generated command files ==="
+
+            find out -type f -name '*.cmd' \
+              -exec grep -n -H -i \
+              'fips140_gen_hmac\|gen_hmac' {} \; \
+              2>/dev/null || true
+
+            echo
+            echo "=== Postlink source ==="
+
+            grep -n -A25 -B5 \
+              'cmd_gen_hmac\|fips140.ko\|fips140_gen_hmac' \
+              "$POSTLINK"
+          } | tee build-report/fips/hmac-postlink.txt
+
+          if ! grep -qi 'fips140_gen_hmac\|gen_hmac' \
+            build-report/fips/hmac-postlink.txt
+          then
+            echo "ERROR: No HMAC postlink evidence found."
+            exit 1
+          fi
+
+          sha256sum build-report/fips/fips140.ko \
+            | tee build-report/fips/sha256.txt
+
+      - name: Verify ramdisk module ordering
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          mkdir -p build-report/fips
+
+          FOUND_LIST=""
+
+          while IFS= read -r candidate; do
+            if grep -q 'fips140.ko' "$candidate"; then
+              FOUND_LIST="$candidate"
+              break
+            fi
+          done < <(
+            find out/shusky -type f -name modules.load -print
+          )
+
+          if [ -z "$FOUND_LIST" ]; then
+            echo "ERROR: Generated modules.load not found with FIPS."
+            find out/shusky -type f -name modules.load -print
+            exit 1
+          fi
+
+          cp "$FOUND_LIST" build-report/fips/modules.load
+
+          FIRST_MODULE="$(
+            grep -v '^[[:space:]]*$' "$FOUND_LIST" \
+              | grep -v '^[[:space:]]*#' \
+              | head -n 1
+          )"
+
+          echo "modules.load: $FOUND_LIST"
+          echo "First module: $FIRST_MODULE"
+
+          case "$FIRST_MODULE" in
+            fips140.ko|kernel/crypto/fips140.ko)
+              echo "FIPS is first in module load order."
+              ;;
+            *)
+              echo "ERROR: FIPS is not the first module."
+              exit 1
+              ;;
+          esac
+
+          sha256sum "$FOUND_LIST" \
+            | tee build-report/fips/modules-load.sha256
+
+      - name: Verify kernel image and baseline modules
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          DIST="out/shusky/dist"
+
+          test -d "$DIST" || {
+            echo "ERROR: Dist directory not found."
+            exit 1
+          }
+
+          IMAGE="$(
+            find "$DIST" -type f \
+              \( -name Image.lz4 -o -name Image \) \
+              -print -quit
+          )"
+
+          test -n "$IMAGE" || {
+            echo "ERROR: No kernel Image found."
+            exit 1
+          }
+
+          file "$IMAGE"
+          sha256sum "$IMAGE"
+
+          mkdir -p build-report/modules
+          : > build-report/module-list.txt
+
+          for module in cfg80211.ko mac80211.ko; do
+            FOUND="$(
+              find out/shusky -type f \
+                -name "$module" -print -quit
+            )"
+
+            if [ -z "$FOUND" ]; then
+              echo "ERROR: $module not found."
+              exit 1
+            fi
+
+            echo "$FOUND" | tee -a build-report/module-list.txt
+            cp "$FOUND" "build-report/modules/$module"
+          done
+
+          if find out/shusky -type f \
+            \( \
+              -name rtl8187.ko \
+              -o -name mt76.ko \
+              -o -name mt76-usb.ko \
+              -o -name mt76x02-lib.ko \
+              -o -name mt76x02-usb.ko \
+              -o -name mt76x2-common.ko \
+              -o -name mt76x2u.ko \
+            \) | grep .
+          then
+            echo "ERROR: Excluded wireless module found."
+            exit 1
+          fi
+
+          echo "Kernel image and baseline modules verified."
+
+      - name: Collect module metadata
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          {
+            echo "=== Kernel image ==="
+
+            find out/shusky/dist -type f \
+              \( -name Image -o -name Image.lz4 \) \
+              -exec file {} \; \
+              -exec sha256sum {} \;
+
+            echo
+            echo "=== Module metadata ==="
+
+            for module in \
+              build-report/modules/*.ko \
+              build-report/fips/fips140.ko
+            do
+              [ -f "$module" ] || continue
+
+              echo
+              echo "FILE: $module"
+              modinfo "$module" || true
+
+              echo "VERMAGIC:"
+              modinfo -F vermagic "$module" || true
+
+              echo "DEPENDS:"
+              modinfo -F depends "$module" || true
+
+              echo "NAME:"
+              modinfo -F name "$module" || true
+
+              echo "IMPORT_NS:"
+              modinfo -F import_ns "$module" || true
+
+              sha256sum "$module"
+            done
+          } | tee build-report/module-metadata.txt
+
+      - name: Collect build diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd workspace
+
+          mkdir -p build-report/diagnostics
+          mkdir -p build-report/symbols
+
+          if [ -d out/shusky/dist ]; then
+            find out/shusky/dist -maxdepth 4 -type f -print \
+              > build-report/diagnostics/dist-files.txt
+          else
+            echo "Dist directory not found." \
+              > build-report/diagnostics/dist-files.txt
+          fi
+
+          if [ -f build-report/build.log ]; then
+            grep -n -A60 -B5 \
+              'kmi_symbol_list_violations' \
+              build-report/build.log || true
+
+            grep -n -A60 -B5 \
+              'missing from the symbol list' \
+              build-report/build.log || true
+
+            grep -n -i -E \
+              'error:|failed|fatal|HMAC|fips140|KMI' \
+              build-report/build.log \
+              | tail -n 300 || true
+          fi
+
+          find . -type f -name Module.symvers \
+            -not -path '*/.git/*' \
+            -not -path '*/.repo/*' \
+            -print \
+            > build-report/symbols/module-symvers-files.txt
+
+          find out -type f \
+            \( \
+              -name '*kmi_symbol_list*checked*' \
+              -o -name '*kmi*violations*' \
+            \) -print 2>/dev/null \
+            > build-report/diagnostics/kmi-markers.txt
+
+      - name: Create build report
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd workspace
+
+          mkdir -p build-report
+
+          {
+            echo "=== Build information ==="
+            date -u
+
+            echo
+            echo "=== Build status ==="
+            cat build-report/build-status.txt 2>/dev/null || true
+
+            echo
+            echo "=== Dist contents ==="
+            if [ -d out/shusky/dist ]; then
+              find out/shusky/dist -type f -print
+            else
+              echo "Dist directory not found."
+            fi
+
+            echo
+            echo "=== FIPS verification ==="
+
+            for file in \
+              build-report/fips/modinfo.txt \
+              build-report/fips/vermagic.txt \
+              build-report/fips/sections.txt \
+              build-report/fips/hmac-postlink.txt \
+              build-report/fips/sha256.txt \
+              build-report/fips/modules.load \
+              build-report/config-check.txt
+            do
+              if [ -f "$file" ]; then
+                echo
+                echo "--- $file ---"
+                cat "$file"
+              fi
+            done
+
+            echo
+            echo "=== KMI markers ==="
+            cat build-report/diagnostics/kmi-markers.txt \
+              2>/dev/null || true
+
+          } > build-report/build-report.txt
+
+      - name: Upload Shiba NetHunter native FIPS artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-nethunter-native-fips-build-test
+          path: |
+            workspace/out/shusky/dist/
+            workspace/build-report/
+          if-no-files-found: warn
+          retention-days: 14
