@@ -1,4 +1,3 @@
-
 name: Build Pixel 8 Shiba - NetHunter FIPS Build Test
 
 on:
@@ -82,6 +81,31 @@ jobs:
             --prune \
             -j2 \
             --fail-fast
+
+      # ================================================
+      # DIAGNOSTISCHE STAP TOEGEVOEGD DOOR EXPERT
+      # ================================================
+      - name: Diagnose Google manifest project paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== REPO PROJECTEN ==="
+          repo list
+
+          echo
+          echo "=== PIXEL ABI BESTAND ==="
+          find . -type f -name 'abi_gki_aarch64_pixel' -print
+
+          echo
+          echo "=== FIPS ABI BESTAND ==="
+          find . -type f -name 'abi_gki_aarch64_fips140' -print
+
+          echo
+          echo "=== COMMON PROJECTMAPPEN ==="
+          find . -maxdepth 4 -type d \
+            \( -name common -o -name common-kernels \) -print
+      # ================================================
 
       - name: Verify Google kernel source and locate FIPS postlink
         shell: bash
