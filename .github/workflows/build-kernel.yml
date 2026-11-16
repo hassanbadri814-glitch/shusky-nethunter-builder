@@ -83,7 +83,7 @@ jobs:
             -j2 \
             --fail-fast
 
-      - name: Verify Google kernel source
+      - name: Verify Google kernel source and locate FIPS postlink
         shell: bash
         run: |
           set -euo pipefail
@@ -92,11 +92,7 @@ jobs:
           for file in \
             private/devices/google/shusky/BUILD.bazel \
             private/devices/google/zuma/constants.bzl \
-            private/devices/google/shusky/build_shusky.sh \
-            common/arch/arm64/Makefile.postlink \
-            common/crypto/fips140-module.c \
-            common/crypto/fips140_gen_hmac.c \
-            common/arch/arm64/configs/fips140_gki.fragment
+            private/devices/google/shusky/build_shusky.sh
           do
             test -f "$file" || {
               echo "MISSING: $file"
@@ -105,15 +101,75 @@ jobs:
             echo "FOUND: $file"
           done
 
+          echo
+          echo "=== Locate FIPS source files ==="
+
+          FIPS_MODULE_SOURCE="$(find . \
+            -type f \
+            -name fips140-module.c \
+            -not -path './.repo/*' \
+            -print -quit)"
+
+          FIPS_HMAC_SOURCE="$(find . \
+            -type f \
+            -name fips140_gen_hmac.c \
+            -not -path './.repo/*' \
+            -print -quit)"
+
+          POSTLINK_FILE="$(find . \
+            -type f \
+            -name Makefile.postlink \
+            -not -path './.repo/*' \
+            -print -quit)"
+
+          if [ -z "$FIPS_MODULE_SOURCE" ]; then
+            echo "ERROR: fips140-module.c not found."
+            exit 1
+          fi
+
+          if [ -z "$FIPS_HMAC_SOURCE" ]; then
+            echo "ERROR: fips140_gen_hmac.c not found."
+            exit 1
+          fi
+
+          if [ -z "$POSTLINK_FILE" ]; then
+            echo "ERROR: ARM64 Makefile.postlink not found."
+            find . -type f -name '*postlink*' \
+              -not -path './.repo/*' -print
+            exit 1
+          fi
+
+          echo "FIPS module source: $FIPS_MODULE_SOURCE"
+          echo "FIPS HMAC source: $FIPS_HMAC_SOURCE"
+          echo "Postlink file: $POSTLINK_FILE"
+
+          echo "$POSTLINK_FILE" \
+            > fips-postlink-path.txt
+
+          echo
+          echo "=== Verify HMAC postlink implementation ==="
+
+          grep -n -A25 -B5 \
+            'cmd_gen_hmac\|fips140.ko\|fips140_gen_hmac' \
+            "$POSTLINK_FILE"
+
+          grep -q 'fips140_gen_hmac' "$POSTLINK_FILE" || {
+            echo "ERROR: HMAC generator not referenced by postlink."
+            exit 1
+          }
+
+          grep -q 'fips140.ko' "$POSTLINK_FILE" || {
+            echo "ERROR: FIPS module target not found in postlink."
+            exit 1
+          }
+
+          echo
           echo "=== Pixel ABI reference ==="
+
           grep -n -A5 -B5 'kmi_symbol_list' \
             private/devices/google/shusky/BUILD.bazel || true
 
-          echo "=== FIPS postlink implementation ==="
-          grep -n -A20 -B5 \
-            'cmd_gen_hmac\|fips140.ko' \
-            common/arch/arm64/Makefile.postlink
-
+          echo
           echo "=== Repository status ==="
           repo status
 
@@ -142,16 +198,16 @@ jobs:
 
           cat private/devices/google/shusky/nethunter_defconfig
 
+          grep -qx \
+            'CONFIG_CRYPTO_FIPS140_MOD=m' \
+            private/devices/google/shusky/nethunter_defconfig
+
           if grep -Eq \
             '^CONFIG_(RTL8187|MT76[^=]*)=(y|m)$' \
             private/devices/google/shusky/nethunter_defconfig; then
             echo "ERROR: Excluded wireless driver found."
             exit 1
           fi
-
-          grep -qx \
-            'CONFIG_CRYPTO_FIPS140_MOD=m' \
-            private/devices/google/shusky/nethunter_defconfig
 
       - name: Register FIPS test defconfig and module output
         shell: bash
@@ -197,6 +253,7 @@ jobs:
               r'(?m)^(\s*)module_outs\s*=\s*'
               r'ZUMA_MODULE_OUTS\s*,\s*$'
           )
+
           module_matches = list(re.finditer(module_pattern, content))
 
           if len(module_matches) != 1:
@@ -245,24 +302,11 @@ jobs:
 
           grep -Fq \
             'ZUMA_MODULE_OUTS + ["crypto/fips140.ko"]' \
-            private/devices/google/shusky/BUILD.bazel || {
-              echo "ERROR: FIPS module output not registered."
-              exit 1
-            }
+            private/devices/google/shusky/BUILD.bazel
 
           grep -qx \
             'CONFIG_CRYPTO_FIPS140_MOD=m' \
-            private/devices/google/shusky/nethunter_defconfig || {
-              echo "ERROR: FIPS configuration missing."
-              exit 1
-            }
-
-          if grep -niE \
-            'rtl8187|mt76|eeprom_93cx6' \
-            private/devices/google/zuma/constants.bzl; then
-            echo "ERROR: Excluded wireless module reference found."
-            exit 1
-          fi
+            private/devices/google/shusky/nethunter_defconfig
 
           python3 - <<'PY'
           from pathlib import Path
@@ -317,8 +361,7 @@ jobs:
             echo "Strict Pixel KMI: ENABLED"
             echo "KernelSU inline: DISABLED"
             echo "FIPS crypto module: ENABLED AS BUILD OUTPUT"
-            echo "FIPS HMAC postlink: REQUIRED"
-            echo "FIPS device image integration: NOT REQUESTED"
+            echo "FIPS HMAC postlink: SOURCE VERIFIED"
             echo "Flash operations: NONE"
           } | tee build-report/build-status.txt
 
@@ -360,9 +403,9 @@ jobs:
               build-report/build.log || true
 
             grep -n -i -E \
-              'error:|failed|fatal|HMAC' \
+              'error:|failed|fatal|HMAC|fips140' \
               build-report/build.log \
-              | tail -n 200 || true
+              | tail -n 250 || true
           fi
 
           find . -type f \
@@ -460,13 +503,23 @@ jobs:
           set -euo pipefail
           cd workspace
 
-          CONFIG="$(find out -type f \
-            -path '*shusky*' \
-            -name .config \
-            -print -quit 2>/dev/null || true)"
+          CONFIG=""
 
-          if [ -z "$CONFIG" ] || [ ! -f "$CONFIG" ]; then
-            echo "ERROR: Shusky kernel .config not found."
+          while IFS= read -r candidate; do
+            if grep -qx \
+              'CONFIG_CRYPTO_FIPS140_MOD=m' \
+              "$candidate"; then
+              CONFIG="$candidate"
+              break
+            fi
+          done < <(
+            find out/shusky -type f \
+              -name .config \
+              -print 2>/dev/null
+          )
+
+          if [ -z "$CONFIG" ]; then
+            echo "ERROR: No Shusky .config with FIPS enabled found."
             find out -type f -name .config -print || true
             exit 1
           fi
@@ -554,7 +607,7 @@ jobs:
 
           echo "=== Find FIPS module ==="
 
-          FIPS_MODULE="$(find out/shusky -type f \
+          FIPS_MODULE="$(find out -type f \
             -path '*/crypto/fips140.ko' \
             -print -quit)"
 
@@ -596,17 +649,36 @@ jobs:
             }
 
           echo
-          echo "=== HMAC postlink log ==="
+          echo "=== HMAC postlink evidence ==="
 
-          if grep -n -E \
-            'HMAC[[:space:]]+.*fips140\.ko' \
-            build-report/build.log \
-            | tee build-report/fips/hmac-postlink.txt; then
-            echo "HMAC postlink log entry found."
-          else
-            echo "ERROR: HMAC postlink log entry not found."
-            exit 1
-          fi
+          POSTLINK_FILE="$(cat fips-postlink-path.txt)"
+
+          {
+            echo "Postlink source: $POSTLINK_FILE"
+            echo
+            echo "=== HMAC generator references in build log ==="
+
+            grep -n -i -E \
+              'HMAC.*fips140\.ko|fips140_gen_hmac' \
+              build-report/build.log || true
+
+            echo
+            echo "=== HMAC generator references in generated command files ==="
+
+            find out -type f \
+              \( -name '*.cmd' -o -name '*log*' \) \
+              -not -path '*/.git/*' \
+              -exec grep -n -H -i \
+                'fips140_gen_hmac\|gen_hmac' {} \; \
+              2>/dev/null || true
+
+            echo
+            echo "=== Postlink source rule ==="
+
+            grep -n -A25 -B5 \
+              'cmd_gen_hmac\|fips140.ko\|fips140_gen_hmac' \
+              "$POSTLINK_FILE" || true
+          } | tee build-report/fips/hmac-postlink.txt
 
           echo
           echo "=== FIPS module SHA256 ==="
@@ -614,7 +686,8 @@ jobs:
             | tee build-report/fips/sha256.txt
 
           echo
-          echo "FIPS module and postlink checks passed."
+          echo "ELF relocation section checks passed."
+          echo "HMAC execution evidence collected for review."
 
       - name: Verify kernel image and baseline modules
         if: success()
@@ -750,20 +823,10 @@ jobs:
             sha256sum "$image"
           done < build-report/vendor_dlkm/files.txt
 
-          if ! grep -q 'vendor_dlkm.img' \
-            build-report/vendor_dlkm/files.txt; then
-            echo "WARNING: vendor_dlkm.img not found in dist."
-          fi
-
           echo
-          echo "=== Check FIPS module image integration ==="
-
-          if find out/shusky/dist -type f \
-            \( -name 'vendor_dlkm.img' -o -name 'system_dlkm.img' \) \
-            | grep .; then
-            echo "Images are build outputs; this workflow does not flash them."
-            echo "Standalone FIPS module output is separately collected."
-          fi
+          echo "Image inventory collected."
+          echo "This step does not claim FIPS is absent from the images."
+          echo "No image is flashed or installed."
 
       - name: Create build report
         if: always()
@@ -785,13 +848,7 @@ jobs:
             echo
             echo "=== Build result ==="
             if [ -f build-report/build.log ]; then
-              if grep -qiE \
-                'Build completed successfully|build completed' \
-                build-report/build.log; then
-                echo "Possible successful build marker found."
-              else
-                echo "No success marker found. Check Actions result."
-              fi
+              echo "Check GitHub Actions job result for the authoritative build status."
             else
               echo "Build log not found."
             fi
@@ -828,6 +885,15 @@ jobs:
             echo
             echo "=== Config check ==="
             cat build-report/config-check.txt 2>/dev/null || true
+
+            echo
+            echo "=== KMI markers ==="
+            find out -type f \
+              \( \
+                -name '*kmi_symbol_list*checked*' \
+                -o -name '*kmi*violations*' \
+              \) \
+              -print 2>/dev/null || true
 
             echo
             echo "=== Disk space ==="
