@@ -124,10 +124,60 @@ jobs:
           echo
           echo "=== DIAGNOSTICS COMPLETE ==="
           
-          # Stop de workflow hier, we willen nog geen kernel bouwen.
-          # De output hierboven is wat we nodig hebben.
+          # Stop de workflow hier. De rest van de build is voor nu niet nodig.
           exit 1
       # ================================================
 
-      # De rest van de build-stappen worden niet uitgevoerd vanwege de exit 1 hierboven.
-      # We kunnen ze later weer activeren als de paden bekend zijn.
+      # De onderstaande stappen worden niet uitgevoerd vanwege de exit 1 hierboven.
+      # Ze blijven in de YAML staan zodat de workflow geldig is en later weer
+      # geactiveerd kunnen worden.
+
+      - name: Verify Google kernel source and locate FIPS postlink
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          for file in \
+            private/devices/google/shusky/BUILD.bazel \
+            private/devices/google/zuma/constants.bzl \
+            private/devices/google/shusky/build_shusky.sh \
+            common/android/abi_gki_aarch64_pixel \
+            common/android/abi_gki_aarch64_fips140
+          do
+            test -f "$file" || {
+              echo "MISSING: $file"
+              exit 1
+            }
+            echo "FOUND: $file"
+          done
+
+      - name: Create safe baseline FIPS test defconfig
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+
+          cat > private/devices/google/shusky/nethunter_defconfig <<'EOF'
+          CONFIG_MODULES=y
+          CONFIG_MODVERSIONS=y
+          CONFIG_WLAN=y
+          CONFIG_CFG80211=m
+          CONFIG_MAC80211=m
+          CONFIG_USB=y
+          CONFIG_CRYPTO_FIPS140_MOD=m
+          EOF
+
+      - name: Build Shusky FIPS test kernel
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+          ./private/devices/google/shusky/build_shusky.sh \
+            --kernel_package=@//aosp \
+            --//build/kernel/kleaf:use_prebuilt_gki=false \
+            --no//private/devices/google/common:download_prebuilt_gki_fips140 \
+            --verbose_failures
