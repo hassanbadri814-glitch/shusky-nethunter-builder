@@ -1,4 +1,4 @@
-name: Build Pixel 8 Shiba - NetHunter FIPS Build Test
+name: Diagnose ABI Paths and Bazel Labels
 
 on:
   workflow_dispatch:
@@ -9,20 +9,11 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: shiba-nethunter-kernel-build
-  cancel-in-progress: false
-
 jobs:
-  build-kernel:
-    name: Build and verify Shiba FIPS test kernel
+  diagnose-paths:
+    name: Diagnose Bazel and ABI paths
     runs-on: ubuntu-latest
     timeout-minutes: 360
-
-    env:
-      DEVICE: shiba
-      KERNEL_DEVICE: shusky
-      CUSTOM_KERNEL_VERSION: "1.33"
 
     steps:
       - name: Free runner disk space
@@ -83,101 +74,43 @@ jobs:
             --fail-fast
 
       # ================================================
-      # DIAGNOSTISCHE STAP (VERBETERD DOOR EXPERT)
+      # DIAGNOSTISCHE STAP (EXACT ZOALS DE EXPERT VROEG)
       # ================================================
-      - name: Diagnose Google manifest project paths
+      - name: Verify ABI paths and Bazel labels
         shell: bash
         run: |
           set -uo pipefail
 
-          echo "=== WORKSPACE ==="
-          pwd
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
-          ls -la "$GITHUB_WORKSPACE"
+          ROOT="$GITHUB_WORKSPACE/workspace"
+
+          echo "=== COMMON DIRECTORY ==="
+          ls -lad "$ROOT/common" "$ROOT/aosp"
+          ls -la "$ROOT/common" | head -30
 
           echo
-          echo "=== REPO WORKSPACES ==="
-          find "$GITHUB_WORKSPACE" -type d -name .repo -prune -print
-
-          while IFS= read -r repo_dir; do
-            root="${repo_dir%/.repo}"
-            echo
-            echo "=== REPO LIST: $root ==="
-            (cd "$root" && repo list) || true
-          done < <(find "$GITHUB_WORKSPACE" -type d -name .repo -prune -print)
+          echo "=== SHUSKY KMI LABELS ==="
+          grep -n -B5 -A12 \
+            'kmi_symbol_list\|additional_kmi_symbol_lists' \
+            "$ROOT/private/devices/google/shusky/BUILD.bazel" || true
 
           echo
-          echo "=== PIXEL ABI FILE ==="
-          find "$GITHUB_WORKSPACE" -type f \
-            -name abi_gki_aarch64_pixel -print
+          echo "=== ABI FILES ==="
+          ls -lh \
+            "$ROOT/aosp/android/abi_gki_aarch64_pixel" \
+            "$ROOT/aosp/android/abi_gki_aarch64_fips140"
 
           echo
-          echo "=== FIPS ABI FILE ==="
-          find "$GITHUB_WORKSPACE" -type f \
-            -name abi_gki_aarch64_fips140 -print
-
-          echo
-          echo "=== GOOGLE COMMON DIRECTORIES ==="
-          find "$GITHUB_WORKSPACE" -maxdepth 6 -type d \
-            \( -name common -o -name common-kernels \) -print
+          echo "=== BAZEL WORKSPACE REFERENCES ==="
+          grep -RniE \
+            'abi_gki_aarch64_pixel|abi_gki_aarch64_fips140|local_repository|repo_mapping' \
+            "$ROOT/private/devices/google/shusky" \
+            "$ROOT/private/devices/google/common" \
+            --include='*.bzl' --include='BUILD*' --include='MODULE.bazel' \
+            --include='WORKSPACE*' 2>/dev/null | head -100
 
           echo
           echo "=== DIAGNOSTICS COMPLETE ==="
           
-          # Stop de workflow hier. De rest van de build is voor nu niet nodig.
+          # Stop de workflow hier. We willen nog geen kernel bouwen.
           exit 1
       # ================================================
-
-      # De onderstaande stappen worden niet uitgevoerd vanwege de exit 1 hierboven.
-      # Ze blijven in de YAML staan zodat de workflow geldig is en later weer
-      # geactiveerd kunnen worden.
-
-      - name: Verify Google kernel source and locate FIPS postlink
-        if: success()
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd workspace
-
-          for file in \
-            private/devices/google/shusky/BUILD.bazel \
-            private/devices/google/zuma/constants.bzl \
-            private/devices/google/shusky/build_shusky.sh \
-            common/android/abi_gki_aarch64_pixel \
-            common/android/abi_gki_aarch64_fips140
-          do
-            test -f "$file" || {
-              echo "MISSING: $file"
-              exit 1
-            }
-            echo "FOUND: $file"
-          done
-
-      - name: Create safe baseline FIPS test defconfig
-        if: success()
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd workspace
-
-          cat > private/devices/google/shusky/nethunter_defconfig <<'EOF'
-          CONFIG_MODULES=y
-          CONFIG_MODVERSIONS=y
-          CONFIG_WLAN=y
-          CONFIG_CFG80211=m
-          CONFIG_MAC80211=m
-          CONFIG_USB=y
-          CONFIG_CRYPTO_FIPS140_MOD=m
-          EOF
-
-      - name: Build Shusky FIPS test kernel
-        if: success()
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd workspace
-          ./private/devices/google/shusky/build_shusky.sh \
-            --kernel_package=@//aosp \
-            --//build/kernel/kleaf:use_prebuilt_gki=false \
-            --no//private/devices/google/common:download_prebuilt_gki_fips140 \
-            --verbose_failures
