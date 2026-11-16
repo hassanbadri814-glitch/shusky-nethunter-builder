@@ -31,7 +31,9 @@ jobs:
       # ================================================
 
       - name: Free runner disk space
+        shell: bash
         run: |
+          set -euo pipefail
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
@@ -39,7 +41,9 @@ jobs:
           df -h
 
       - name: Install build dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
             git curl python3 python3-pip python-is-python3 \
@@ -48,7 +52,9 @@ jobs:
             kmod xz-utils zstd
 
       - name: Install Android repo tool
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p "$HOME/bin"
           curl -fsSL \
             https://storage.googleapis.com/git-repo-downloads/repo \
@@ -61,7 +67,9 @@ jobs:
       # ================================================
 
       - name: Initialize Google kernel repository
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p workspace
           cd workspace
 
@@ -76,7 +84,9 @@ jobs:
 
       - name: Sync Google kernel source
         timeout-minutes: 120
+        shell: bash
         run: |
+          set -euo pipefail
           cd workspace
 
           repo sync \
@@ -88,21 +98,57 @@ jobs:
             --fail-fast
 
       # ================================================
-      # 4. Verify Google source tree
+      # 4. Verify Google source tree and locate ABI
       # ================================================
 
       - name: Verify Google kernel source
+        shell: bash
         run: |
+          set -euo pipefail
           cd workspace
 
-          test -f private/devices/google/shusky/BUILD.bazel
-          test -f private/devices/google/zuma/constants.bzl
-          test -f private/devices/google/shusky/build_shusky.sh
-          test -f common/android/abi_gki_aarch64_pixel
+          echo "=== Required Shusky source files ==="
 
-          echo "Official Google Shusky source tree verified."
-          echo "Device: $DEVICE"
-          echo "Kernel target: $KERNEL_DEVICE"
+          for file in \
+            private/devices/google/shusky/BUILD.bazel \
+            private/devices/google/zuma/constants.bzl \
+            private/devices/google/shusky/build_shusky.sh
+          do
+            if [ -f "$file" ]; then
+              echo "FOUND: $file"
+            else
+              echo "MISSING: $file"
+              exit 1
+            fi
+          done
+
+          echo
+          echo "=== ABI reference in BUILD.bazel ==="
+
+          grep -n -A5 -B5 'kmi_symbol_list' \
+            private/devices/google/shusky/BUILD.bazel || true
+
+          echo
+          echo "=== Locate Pixel ABI files ==="
+
+          find . \
+            -path './.repo' -prune -o \
+            -type f \
+            \( \
+              -name 'abi_gki_aarch64_pixel' \
+              -o -name 'abi_gki_aarch64*' \
+            \) \
+            -print
+
+          echo
+          echo "=== Repo projects ==="
+
+          repo list | grep -E \
+            'google/shusky|google/zuma|kernel/common' || true
+
+          echo
+          echo "=== Repo status ==="
+
           repo status
 
       # ================================================
@@ -110,13 +156,17 @@ jobs:
       # ================================================
 
       - name: Create safe baseline defconfig
+        shell: bash
         run: |
+          set -euo pipefail
           cd workspace
 
           cat > private/devices/google/shusky/nethunter_defconfig <<'EOF'
           # NetHunter safe baseline
-          # External RTL8187 and MT76 drivers are intentionally excluded.
+          # RTL8187 and MT76 intentionally excluded.
 
+          CONFIG_MODULES=y
+          CONFIG_MODVERSIONS=y
           CONFIG_WLAN=y
           CONFIG_CFG80211=m
           CONFIG_MAC80211=m
@@ -127,9 +177,9 @@ jobs:
           cat private/devices/google/shusky/nethunter_defconfig
 
           if grep -Eq \
-            'CONFIG_RTL8187=|CONFIG_MT76[^=]*=' \
+            '^CONFIG_(RTL8187|MT76[^=]*)=(y|m)$' \
             private/devices/google/shusky/nethunter_defconfig; then
-            echo "ERROR: Excluded wireless driver found in defconfig."
+            echo "ERROR: Excluded wireless driver found."
             exit 1
           fi
 
@@ -138,7 +188,9 @@ jobs:
       # ================================================
 
       - name: Register safe baseline defconfig
+        shell: bash
         run: |
+          set -euo pipefail
           cd workspace
 
           python3 - <<'PY'
@@ -158,7 +210,8 @@ jobs:
 
           if len(matches) != 1:
               raise SystemExit(
-                  f"Expected one shusky_defconfig entry, found {len(matches)}"
+                  "Expected exactly one shusky_defconfig entry; "
+                  f"found {len(matches)}"
               )
 
           match = matches[0]
@@ -169,13 +222,13 @@ jobs:
               f'{indent}"nethunter_defconfig",'
           )
 
-          content = (
+          updated = (
               content[:match.start()]
               + replacement
               + content[match.end():]
           )
 
-          path.write_text(content)
+          path.write_text(updated)
           print("Safe baseline defconfig registered.")
           PY
 
@@ -184,31 +237,35 @@ jobs:
       # ================================================
 
       - name: Validate source modifications
+        shell: bash
         run: |
+          set -euo pipefail
           cd workspace
 
           echo "=== Registered defconfig ==="
+
           grep -n -A8 -B4 \
             nethunter_defconfig \
             private/devices/google/shusky/BUILD.bazel
 
           echo
           echo "=== Existing Google module outputs ==="
+
           grep -n -A15 -B3 \
             'net/wireless/cfg80211.ko' \
-            private/devices/google/zuma/constants.bzl
+            private/devices/google/zuma/constants.bzl || true
 
           echo
           echo "=== Verify excluded drivers are not registered ==="
 
-          if grep -nE \
+          if grep -niE \
             'rtl8187|mt76|eeprom_93cx6' \
             private/devices/google/zuma/constants.bzl; then
-            echo "ERROR: Excluded wireless module found in module outputs."
+            echo "ERROR: Excluded wireless module reference found."
             exit 1
           fi
 
-          echo "No RTL8187 or MT76 modules registered by this workflow."
+          echo "No excluded wireless drivers registered."
 
           echo
           echo "=== Whitespace and conflict checks ==="
@@ -263,7 +320,9 @@ jobs:
       # ================================================
 
       - name: Build Shusky safe baseline kernel
+        shell: bash
         run: |
+          set -euo pipefail
           cd workspace
 
           mkdir -p build-report
@@ -272,7 +331,7 @@ jobs:
             echo "Build started: $(date -u)"
             echo "Device: $DEVICE"
             echo "Kernel target: $KERNEL_DEVICE"
-            echo "Kernel version: $CUSTOM_KERNEL_VERSION"
+            echo "Kernel version label: $CUSTOM_KERNEL_VERSION"
             echo "Target: //private/devices/google/shusky:zuma_shusky_dist"
             echo "Build type: SAFE BASELINE"
             echo "RTL8187: EXCLUDED"
@@ -281,8 +340,6 @@ jobs:
             echo "KernelSU inline: DISABLED"
             echo "Flash operations: NONE"
           } | tee build-report/build-status.txt
-
-          set -euo pipefail
 
           ./private/devices/google/shusky/build_shusky.sh \
             --kernel_package=@//aosp \
@@ -297,7 +354,9 @@ jobs:
 
       - name: Collect build diagnostics
         if: always()
+        shell: bash
         run: |
+          set +e
           cd workspace
 
           mkdir -p build-report/diagnostics
@@ -340,22 +399,23 @@ jobs:
             -not -path '*/.git/*' \
             -not -path '*/.repo/*' \
             -print \
-            > build-report/symbols/module-symvers-files.txt || true
+            > build-report/symbols/module-symvers-files.txt
 
           cat build-report/symbols/module-symvers-files.txt
 
           echo
           echo "=== ABI and KMI files ==="
 
-          find out -type f \
+          find out common -type f \
             \( \
               -name abi_symbollist.raw \
               -o -name abi_gki_protected_exports_aarch64 \
               -o -name '*abi*' \
             \) \
             -not -path '*/.git/*' \
+            -not -path '*/.repo/*' \
             -print 2>/dev/null \
-            > build-report/diagnostics/abi-files.txt || true
+            > build-report/diagnostics/abi-files.txt
 
           cat build-report/diagnostics/abi-files.txt
 
@@ -368,7 +428,9 @@ jobs:
 
       - name: Analyze exported symbols and ABI
         if: always()
+        shell: bash
         run: |
+          set +e
           cd workspace
 
           mkdir -p build-report/symbol-analysis
@@ -395,7 +457,6 @@ jobs:
                 grep -nE \
                   "^[^[:space:]]+[[:space:]]+(${SYMBOLS})[[:space:]]" \
                   "$file" || true
-
               } >> "$REPORT/module-symbols.txt"
 
             done < "$MANIFEST"
@@ -420,7 +481,6 @@ jobs:
                 grep -nE \
                   "^(${SYMBOLS})([[:space:]]|$)" \
                   "$file" || true
-
               } >> "$REPORT/abi-symbols.txt"
 
             done < "$ABI_FILES"
@@ -443,26 +503,23 @@ jobs:
 
       - name: Verify final kernel configuration
         if: success()
+        shell: bash
         run: |
+          set -euo pipefail
           cd workspace
 
-          DIST="out/shusky/dist"
-          CONFIG=""
-
-          if [ -f "$DIST/.config" ]; then
-            CONFIG="$DIST/.config"
-          else
-            CONFIG="$(find out/bazel -type f \
-              -path '*/private/devices/google/shusky/kernel/.config' \
-              -print -quit 2>/dev/null || true)"
-          fi
+          CONFIG="$(find out -type f \
+            -path '*shusky*' \
+            -name .config \
+            -print -quit 2>/dev/null || true)"
 
           if [ -z "$CONFIG" ] || [ ! -f "$CONFIG" ]; then
-            echo "ERROR: Final kernel .config not found."
+            echo "ERROR: Shusky kernel .config not found."
             find out -type f -name .config -print || true
             exit 1
           fi
 
+          echo "Using config: $CONFIG"
           cp "$CONFIG" build-report/final.config
 
           {
@@ -484,7 +541,6 @@ jobs:
               grep -E "^${option}=" "$CONFIG" || true
               grep -E "^# ${option} is not set$" "$CONFIG" || true
             done
-
           } | tee build-report/config-check.txt
 
           check_config() {
@@ -524,44 +580,61 @@ jobs:
 
       - name: Verify kernel image and baseline modules
         if: success()
+        shell: bash
         run: |
+          set -euo pipefail
           cd workspace
 
           DIST="out/shusky/dist"
 
-          test -f "$DIST/Image.lz4" || {
-            echo "ERROR: Image.lz4 missing."
-            find "$DIST" -maxdepth 3 -type f
+          if [ ! -d "$DIST" ]; then
+            echo "ERROR: Expected dist directory not found."
+            find out/shusky -maxdepth 4 -type f -print || true
             exit 1
-          }
+          fi
 
-          MODULES=(
-            cfg80211.ko
-            mac80211.ko
-          )
+          echo "=== Kernel image candidates ==="
+
+          IMAGE="$(find "$DIST" -type f \
+            \( -name Image.lz4 -o -name Image \) \
+            -print -quit)"
+
+          if [ -z "$IMAGE" ]; then
+            echo "ERROR: No Image or Image.lz4 found in dist."
+            find "$DIST" -maxdepth 4 -type f -print
+            exit 1
+          fi
+
+          echo "Kernel image: $IMAGE"
+          file "$IMAGE"
+          sha256sum "$IMAGE"
 
           mkdir -p build-report/modules
           : > build-report/module-list.txt
 
-          for module in "${MODULES[@]}"; do
-            found="$(find "$DIST" -type f \
-              -name "$module" -print -quit)"
+          echo
+          echo "=== Locate baseline wireless modules ==="
 
-            if [ -z "$found" ]; then
-              echo "ERROR: Missing baseline module: $module"
+          for module in cfg80211.ko mac80211.ko; do
+            FOUND="$(find out -type f \
+              -path '*shusky*' \
+              -name "$module" \
+              -print -quit)"
+
+            if [ -z "$FOUND" ]; then
+              echo "ERROR: $module was not found in Shusky output."
+              find out -type f -name "$module" -print || true
               exit 1
             fi
 
-            echo "$found" \
-              | tee -a build-report/module-list.txt
-
-            cp "$found" "build-report/modules/$module"
+            echo "$FOUND" | tee -a build-report/module-list.txt
+            cp "$FOUND" "build-report/modules/$module"
           done
 
           echo
           echo "=== Confirm excluded modules are absent ==="
 
-          if find "$DIST" -type f \
+          if find out/shusky -type f \
             \( \
               -name 'rtl8187.ko' \
               -o -name 'mt76.ko' \
@@ -576,7 +649,7 @@ jobs:
           fi
 
           echo "Excluded wireless modules are absent."
-          echo "Baseline kernel image and modules verified."
+          echo "Kernel image and baseline modules verified."
 
       # ================================================
       # 13. Collect module metadata
@@ -584,13 +657,17 @@ jobs:
 
       - name: Collect module metadata
         if: success()
+        shell: bash
         run: |
+          set -euo pipefail
           cd workspace
 
           {
             echo "=== Kernel image ==="
-            file out/shusky/dist/Image.lz4
-            sha256sum out/shusky/dist/Image.lz4
+            find out/shusky/dist -type f \
+              \( -name Image -o -name Image.lz4 \) \
+              -exec file {} \; \
+              -exec sha256sum {} \;
 
             echo
             echo "=== Module metadata ==="
@@ -615,7 +692,6 @@ jobs:
 
               sha256sum "$module"
             done
-
           } | tee build-report/module-metadata.txt
 
           for module in build-report/modules/*.ko; do
@@ -629,7 +705,9 @@ jobs:
 
       - name: Inspect vendor_dlkm output
         if: success()
+        shell: bash
         run: |
+          set -euo pipefail
           cd workspace
 
           mkdir -p build-report/vendor_dlkm
@@ -649,10 +727,8 @@ jobs:
             [ -f "$image" ] || continue
 
             cp "$image" build-report/vendor_dlkm/
-
             file "$image"
             sha256sum "$image"
-
           done < build-report/vendor_dlkm/files.txt
 
           if ! grep -q 'vendor_dlkm.img' \
@@ -666,7 +742,9 @@ jobs:
 
       - name: Create build report
         if: always()
+        shell: bash
         run: |
+          set +e
           cd workspace
 
           mkdir -p build-report
@@ -683,12 +761,16 @@ jobs:
 
             echo
             echo "=== Build result ==="
-            if [ -f build-report/build.log ] &&
-               grep -q 'Build completed successfully' \
-                 build-report/build.log; then
-              echo "Build completed successfully."
+            if [ -f build-report/build.log ]; then
+              if grep -qiE \
+                'Build completed successfully|build completed' \
+                build-report/build.log; then
+                echo "Possible successful build marker found."
+              else
+                echo "No success marker found. Check Actions result."
+              fi
             else
-              echo "Check build.log and GitHub Actions job result."
+              echo "Build log not found."
             fi
 
             echo
@@ -702,8 +784,9 @@ jobs:
             echo
             echo "=== Disk space ==="
             df -h
-
           } > build-report/build-report.txt
+
+          cat build-report/build-report.txt
 
       # ================================================
       # 16. Upload diagnostic and build artifacts
