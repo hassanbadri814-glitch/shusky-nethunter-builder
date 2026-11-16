@@ -1,5 +1,5 @@
 
-name: Build Pixel 8 Shiba - NetHunter GKI Kernel
+name: Build Pixel 8 Shiba - NetHunter Safe Baseline
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   build-kernel:
-    name: Build and verify Shiba NetHunter kernel
+    name: Build and verify Shiba safe baseline kernel
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -26,7 +26,6 @@ jobs:
       CUSTOM_KERNEL_VERSION: "1.33"
 
     steps:
-
       # ================================================
       # 1. Prepare GitHub runner
       # ================================================
@@ -51,11 +50,9 @@ jobs:
       - name: Install Android repo tool
         run: |
           mkdir -p "$HOME/bin"
-
           curl -fsSL \
             https://storage.googleapis.com/git-repo-downloads/repo \
             -o "$HOME/bin/repo"
-
           chmod a+x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
@@ -101,43 +98,46 @@ jobs:
           test -f private/devices/google/shusky/BUILD.bazel
           test -f private/devices/google/zuma/constants.bzl
           test -f private/devices/google/shusky/build_shusky.sh
+          test -f common/android/abi_gki_aarch64_pixel
 
-          echo "Google Shusky source tree verified."
+          echo "Official Google Shusky source tree verified."
+          echo "Device: $DEVICE"
+          echo "Kernel target: $KERNEL_DEVICE"
           repo status
 
       # ================================================
-      # 5. Create NetHunter defconfig
+      # 5. Create safe NetHunter baseline defconfig
       # ================================================
 
-      - name: Create NetHunter defconfig
+      - name: Create safe baseline defconfig
         run: |
           cd workspace
 
           cat > private/devices/google/shusky/nethunter_defconfig <<'EOF'
-          # NetHunter external USB wireless support
+          # NetHunter safe baseline
+          # External RTL8187 and MT76 drivers are intentionally excluded.
 
           CONFIG_WLAN=y
           CONFIG_CFG80211=m
           CONFIG_MAC80211=m
           CONFIG_USB=y
-
-          # Realtek RTL8187 USB adapter
-          CONFIG_WLAN_VENDOR_REALTEK=y
-          CONFIG_EEPROM_93CX6=m
-          CONFIG_RTL8187=m
-
-          # MediaTek MT76x2U USB adapter
-          CONFIG_WLAN_VENDOR_MEDIATEK=y
-          CONFIG_MT76x2U=m
           EOF
 
+          echo "=== Safe baseline defconfig ==="
           cat private/devices/google/shusky/nethunter_defconfig
+
+          if grep -Eq \
+            'CONFIG_RTL8187=|CONFIG_MT76[^=]*=' \
+            private/devices/google/shusky/nethunter_defconfig; then
+            echo "ERROR: Excluded wireless driver found in defconfig."
+            exit 1
+          fi
 
       # ================================================
       # 6. Register NetHunter defconfig
       # ================================================
 
-      - name: Register NetHunter defconfig
+      - name: Register safe baseline defconfig
         run: |
           cd workspace
 
@@ -150,7 +150,7 @@ jobs:
 
           if '"nethunter_defconfig"' in content:
               raise SystemExit(
-                  "nethunter_defconfig already registered"
+                  "ERROR: nethunter_defconfig already registered"
               )
 
           pattern = r'(?m)^(\s*)"shusky_defconfig",\s*$'
@@ -176,90 +176,42 @@ jobs:
           )
 
           path.write_text(content)
-
-          print("NetHunter defconfig registered.")
+          print("Safe baseline defconfig registered.")
           PY
 
       # ================================================
-      # 7. Register wireless modules
-      # ================================================
-
-      - name: Register NetHunter modules
-        run: |
-          cd workspace
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("private/devices/google/zuma/constants.bzl")
-          content = path.read_text()
-
-          marker = '    "net/wireless/cfg80211.ko",'
-
-          if content.count(marker) != 1:
-              raise SystemExit(
-                  "Expected exactly one cfg80211 entry"
-              )
-
-          modules = [
-              "drivers/misc/eeprom/eeprom_93cx6.ko",
-              "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76-usb.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x02-lib.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x02-usb.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2-common.ko",
-              "drivers/net/wireless/mediatek/mt76/mt76x2/mt76x2u.ko",
-          ]
-
-          for module in modules:
-              if f'"{module}"' in content:
-                  raise SystemExit(
-                      f"Module already registered: {module}"
-                  )
-
-          addition = "\n".join(
-              f'    "{module}",'
-              for module in modules
-          )
-
-          content = content.replace(
-              marker,
-              marker + "\n" + addition,
-              1
-          )
-
-          path.write_text(content)
-
-          print("Wireless modules registered:")
-          for module in modules:
-              print(" -", module)
-          PY
-
-      # ================================================
-      # 8. Validate source modifications
+      # 7. Validate source modifications
       # ================================================
 
       - name: Validate source modifications
         run: |
           cd workspace
 
-          echo "=== Check NetHunter defconfig ==="
-
-          test -f \
-            private/devices/google/shusky/nethunter_defconfig
-
+          echo "=== Registered defconfig ==="
           grep -n -A8 -B4 \
             nethunter_defconfig \
             private/devices/google/shusky/BUILD.bazel
 
-          echo "=== Check registered wireless modules ==="
-
+          echo
+          echo "=== Existing Google module outputs ==="
           grep -n -A15 -B3 \
-            cfg80211 \
+            'net/wireless/cfg80211.ko' \
             private/devices/google/zuma/constants.bzl
 
-          echo "=== Check whitespace ==="
+          echo
+          echo "=== Verify excluded drivers are not registered ==="
+
+          if grep -nE \
+            'rtl8187|mt76|eeprom_93cx6' \
+            private/devices/google/zuma/constants.bzl; then
+            echo "ERROR: Excluded wireless module found in module outputs."
+            exit 1
+          fi
+
+          echo "No RTL8187 or MT76 modules registered by this workflow."
+
+          echo
+          echo "=== Whitespace and conflict checks ==="
 
           python3 - <<'PY'
           from pathlib import Path
@@ -268,7 +220,6 @@ jobs:
           files = [
               Path("private/devices/google/shusky/BUILD.bazel"),
               Path("private/devices/google/shusky/nethunter_defconfig"),
-              Path("private/devices/google/zuma/constants.bzl"),
           ]
 
           failed = False
@@ -304,14 +255,14 @@ jobs:
           if failed:
               sys.exit(1)
 
-          print("Source whitespace checks passed.")
+          print("Source validation passed.")
           PY
 
       # ================================================
-      # 9. Build official Shusky target
+      # 8. Build official Shusky target
       # ================================================
 
-      - name: Build Shusky NetHunter kernel
+      - name: Build Shusky safe baseline kernel
         run: |
           cd workspace
 
@@ -323,9 +274,15 @@ jobs:
             echo "Kernel target: $KERNEL_DEVICE"
             echo "Kernel version: $CUSTOM_KERNEL_VERSION"
             echo "Target: //private/devices/google/shusky:zuma_shusky_dist"
+            echo "Build type: SAFE BASELINE"
+            echo "RTL8187: EXCLUDED"
+            echo "MT76: EXCLUDED"
+            echo "Strict Pixel KMI: ENABLED"
+            echo "KernelSU inline: DISABLED"
+            echo "Flash operations: NONE"
           } | tee build-report/build-status.txt
 
-          set -o pipefail
+          set -euo pipefail
 
           ./private/devices/google/shusky/build_shusky.sh \
             --kernel_package=@//aosp \
@@ -335,42 +292,30 @@ jobs:
             2>&1 | tee build-report/build.log
 
       # ================================================
-      # 10. Collect diagnostics after build
+      # 9. Collect diagnostics, even after build failure
       # ================================================
 
-      - name: Collect diagnostics after build
+      - name: Collect build diagnostics
         if: always()
         run: |
           cd workspace
 
-          set -u
-
           mkdir -p build-report/diagnostics
           mkdir -p build-report/symbols
 
-          echo "=== Build output files ==="
+          echo "=== Dist directory ==="
 
-          if [ -d out/shusky ]; then
-            find out/shusky -type f \
-              \( \
-                -name 'Module.symvers' \
-                -o -name '*.stg' \
-                -o -name '*.symvers' \
-                -o -name '*abi*' \
-                -o -name '*kmi*' \
-                -o -name '.config' \
-              \) \
+          if [ -d out/shusky/dist ]; then
+            find out/shusky/dist -maxdepth 3 -type f \
               -print \
-              > build-report/diagnostics/files.txt
+              | tee build-report/diagnostics/dist-files.txt
           else
-            echo "out/shusky does not exist" \
-              > build-report/diagnostics/files.txt
+            echo "Dist directory not found." \
+              | tee build-report/diagnostics/dist-files.txt
           fi
 
-          cat build-report/diagnostics/files.txt
-
           echo
-          echo "=== KMI errors ==="
+          echo "=== Relevant build errors ==="
 
           if [ -f build-report/build.log ]; then
             grep -n -A60 -B5 \
@@ -380,6 +325,11 @@ jobs:
             grep -n -A60 -B5 \
               'missing from the symbol list' \
               build-report/build.log || true
+
+            grep -n -i -E \
+              'error:|failed|fatal' \
+              build-report/build.log \
+              | tail -n 150 || true
           fi
 
           echo
@@ -390,53 +340,53 @@ jobs:
             -not -path '*/.git/*' \
             -not -path '*/.repo/*' \
             -print \
-            > build-report/symbols/module-symvers-files.txt \
-            || true
+            > build-report/symbols/module-symvers-files.txt || true
 
           cat build-report/symbols/module-symvers-files.txt
+
+          echo
+          echo "=== ABI and KMI files ==="
+
+          find out -type f \
+            \( \
+              -name abi_symbollist.raw \
+              -o -name abi_gki_protected_exports_aarch64 \
+              -o -name '*abi*' \
+            \) \
+            -not -path '*/.git/*' \
+            -print 2>/dev/null \
+            > build-report/diagnostics/abi-files.txt || true
+
+          cat build-report/diagnostics/abi-files.txt
 
           echo
           echo "Diagnostics collection completed."
 
       # ================================================
-      # 11. Analyze Module.symvers and ABI lists
+      # 10. Analyze Module.symvers and ABI symbols
       # ================================================
 
-      - name: Analyze exported symbols and ABI list
+      - name: Analyze exported symbols and ABI
         if: always()
         run: |
           cd workspace
 
-          set -u
+          mkdir -p build-report/symbol-analysis
 
           REPORT="build-report/symbol-analysis"
           MANIFEST="build-report/symbols/module-symvers-files.txt"
-
-          mkdir -p "$REPORT"
 
           SYMBOLS='__dev_kfree_skb_irq|__ioread32_copy|__iowrite32_copy|dev_set_threaded|of_get_mac_address|pci_disable_link_state|pcie_capability_clear_and_set_word|radix_tree_tagged|rfkill_pause_polling|sched_set_fifo_low|skb_to_sgvec|skb_unlink|usb_alloc_urb|usb_anchor_urb|usb_bulk_msg|usb_control_msg|usb_deregister|usb_free_urb|usb_get_dev|usb_init_urb|usb_kill_anchored_urbs|usb_kill_urb|usb_poison_urb|usb_put_dev|usb_register_driver|usb_reset_device|usb_submit_urb|usb_unanchor_urb|usb_unpoison_urb'
 
           : > "$REPORT/module-symbols.txt"
           : > "$REPORT/abi-symbols.txt"
-          : > "$REPORT/abi-files.txt"
 
           echo "=== Module.symvers analysis ==="
 
-          if [ ! -s "$MANIFEST" ]; then
-            echo "ERROR: Module.symvers manifest missing or empty." \
-              | tee "$REPORT/module-symbols.txt"
-          else
+          if [ -s "$MANIFEST" ]; then
             while IFS= read -r file; do
               [ -n "$file" ] || continue
-
-              echo
-              echo "Checking: $file"
-
-              if [ ! -f "$file" ]; then
-                echo "MISSING: $file" \
-                  >> "$REPORT/module-symbols.txt"
-                continue
-              fi
+              [ -f "$file" ] || continue
 
               {
                 echo
@@ -449,26 +399,17 @@ jobs:
               } >> "$REPORT/module-symbols.txt"
 
             done < "$MANIFEST"
+          else
+            echo "No Module.symvers files found." \
+              > "$REPORT/module-symbols.txt"
           fi
 
           echo
-          echo "=== ABI symbol lists ==="
+          echo "=== ABI symbol analysis ==="
 
-          find out -type f \
-            \( \
-              -name abi_symbollist.raw \
-              -o -name abi_gki_protected_exports_aarch64 \
-            \) \
-            -not -path '*/.git/*' \
-            -print 2>/dev/null \
-            > "$REPORT/abi-files.txt" || true
+          ABI_FILES="build-report/diagnostics/abi-files.txt"
 
-          cat "$REPORT/abi-files.txt"
-
-          if [ ! -s "$REPORT/abi-files.txt" ]; then
-            echo "No ABI symbol lists found." \
-              > "$REPORT/abi-symbols.txt"
-          else
+          if [ -s "$ABI_FILES" ]; then
             while IFS= read -r file; do
               [ -f "$file" ] || continue
 
@@ -482,22 +423,22 @@ jobs:
 
               } >> "$REPORT/abi-symbols.txt"
 
-            done < "$REPORT/abi-files.txt"
+            done < "$ABI_FILES"
+          else
+            echo "No ABI files found." \
+              > "$REPORT/abi-symbols.txt"
           fi
 
           echo
-          echo "=== Module.symvers matches ==="
+          echo "=== Module symbol matches ==="
           cat "$REPORT/module-symbols.txt"
 
           echo
-          echo "=== ABI matches ==="
+          echo "=== ABI symbol matches ==="
           cat "$REPORT/abi-symbols.txt"
 
-          echo
-          echo "Symbol analysis completed."
-
       # ================================================
-      # 12. Verify final kernel configuration
+      # 11. Verify final kernel configuration
       # ================================================
 
       - name: Verify final kernel configuration
@@ -525,7 +466,7 @@ jobs:
           cp "$CONFIG" build-report/final.config
 
           {
-            echo "=== Required configuration ==="
+            echo "=== Required baseline configuration ==="
 
             for option in \
               CONFIG_MODULES \
@@ -534,24 +475,15 @@ jobs:
               CONFIG_CFG80211 \
               CONFIG_MAC80211 \
               CONFIG_USB \
-              CONFIG_WLAN_VENDOR_REALTEK \
-              CONFIG_EEPROM_93CX6 \
+              CONFIG_KSU \
               CONFIG_RTL8187 \
-              CONFIG_WLAN_VENDOR_MEDIATEK \
               CONFIG_MT76_CORE \
               CONFIG_MT76_USB \
-              CONFIG_MT76x02_LIB \
-              CONFIG_MT76x02_USB \
-              CONFIG_MT76x2_COMMON \
               CONFIG_MT76x2U
             do
               grep -E "^${option}=" "$CONFIG" || true
+              grep -E "^# ${option} is not set$" "$CONFIG" || true
             done
-
-            echo
-            echo "=== KernelSU setting ==="
-
-            grep -E '^CONFIG_KSU=' "$CONFIG" || true
 
           } | tee build-report/config-check.txt
 
@@ -571,24 +503,26 @@ jobs:
           check_config CONFIG_CFG80211 m
           check_config CONFIG_MAC80211 m
           check_config CONFIG_USB y
-          check_config CONFIG_WLAN_VENDOR_REALTEK y
-          check_config CONFIG_EEPROM_93CX6 m
-          check_config CONFIG_RTL8187 m
-          check_config CONFIG_WLAN_VENDOR_MEDIATEK y
-          check_config CONFIG_MT76x2U m
 
-          if grep -Eq '^CONFIG_KSU=(y|m)$' "$CONFIG"; then
-            echo "ERROR: KernelSU unexpectedly enabled"
+          if grep -Eq \
+            '^CONFIG_(RTL8187|MT76[^=]*)=(y|m)$' \
+            "$CONFIG"; then
+            echo "ERROR: RTL8187 or MT76 unexpectedly enabled."
             exit 1
           fi
 
-          echo "Configuration checks passed."
+          if grep -Eq '^CONFIG_KSU=(y|m)$' "$CONFIG"; then
+            echo "ERROR: KernelSU unexpectedly built into kernel."
+            exit 1
+          fi
+
+          echo "Baseline configuration checks passed."
 
       # ================================================
-      # 13. Verify kernel image and wireless modules
+      # 12. Verify kernel image and baseline modules
       # ================================================
 
-      - name: Verify kernel image and wireless modules
+      - name: Verify kernel image and baseline modules
         if: success()
         run: |
           cd workspace
@@ -596,20 +530,12 @@ jobs:
           DIST="out/shusky/dist"
 
           test -f "$DIST/Image.lz4" || {
-            echo "ERROR: Image.lz4 missing"
+            echo "ERROR: Image.lz4 missing."
             find "$DIST" -maxdepth 3 -type f
             exit 1
           }
 
           MODULES=(
-            eeprom_93cx6.ko
-            rtl8187.ko
-            mt76.ko
-            mt76-usb.ko
-            mt76x02-lib.ko
-            mt76x02-usb.ko
-            mt76x2-common.ko
-            mt76x2u.ko
             cfg80211.ko
             mac80211.ko
           )
@@ -622,7 +548,7 @@ jobs:
               -name "$module" -print -quit)"
 
             if [ -z "$found" ]; then
-              echo "ERROR: Missing module: $module"
+              echo "ERROR: Missing baseline module: $module"
               exit 1
             fi
 
@@ -632,10 +558,28 @@ jobs:
             cp "$found" "build-report/modules/$module"
           done
 
-          echo "All expected modules found."
+          echo
+          echo "=== Confirm excluded modules are absent ==="
+
+          if find "$DIST" -type f \
+            \( \
+              -name 'rtl8187.ko' \
+              -o -name 'mt76.ko' \
+              -o -name 'mt76-usb.ko' \
+              -o -name 'mt76x02-lib.ko' \
+              -o -name 'mt76x02-usb.ko' \
+              -o -name 'mt76x2-common.ko' \
+              -o -name 'mt76x2u.ko' \
+            \) | grep .; then
+            echo "ERROR: An excluded wireless driver was found."
+            exit 1
+          fi
+
+          echo "Excluded wireless modules are absent."
+          echo "Baseline kernel image and modules verified."
 
       # ================================================
-      # 14. Collect module metadata
+      # 13. Collect module metadata
       # ================================================
 
       - name: Collect module metadata
@@ -645,7 +589,6 @@ jobs:
 
           {
             echo "=== Kernel image ==="
-
             file out/shusky/dist/Image.lz4
             sha256sum out/shusky/dist/Image.lz4
 
@@ -681,7 +624,7 @@ jobs:
           done > build-report/vermagic-check.txt
 
       # ================================================
-      # 15. Inspect vendor_dlkm outputs
+      # 14. Inspect vendor_dlkm outputs
       # ================================================
 
       - name: Inspect vendor_dlkm output
@@ -718,7 +661,7 @@ jobs:
           fi
 
       # ================================================
-      # 16. Create build report
+      # 15. Create final build report
       # ================================================
 
       - name: Create build report
@@ -734,18 +677,26 @@ jobs:
 
             echo
             echo "=== Build status ==="
-
             if [ -f build-report/build-status.txt ]; then
               cat build-report/build-status.txt
             fi
 
             echo
-            echo "=== Dist contents ==="
+            echo "=== Build result ==="
+            if [ -f build-report/build.log ] &&
+               grep -q 'Build completed successfully' \
+                 build-report/build.log; then
+              echo "Build completed successfully."
+            else
+              echo "Check build.log and GitHub Actions job result."
+            fi
 
+            echo
+            echo "=== Dist contents ==="
             if [ -d out/shusky/dist ]; then
               find out/shusky/dist -type f -print
             else
-              echo "Dist directory not found"
+              echo "Dist directory not found."
             fi
 
             echo
@@ -755,14 +706,14 @@ jobs:
           } > build-report/build-report.txt
 
       # ================================================
-      # 17. Upload diagnostic and build artifacts
+      # 16. Upload diagnostic and build artifacts
       # ================================================
 
-      - name: Upload Shiba NetHunter build artifact
+      - name: Upload Shiba safe baseline artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shiba-nethunter-diagnostic-build
+          name: shiba-nethunter-safe-baseline
           path: |
             workspace/out/shusky/dist/
             workspace/build-report/
