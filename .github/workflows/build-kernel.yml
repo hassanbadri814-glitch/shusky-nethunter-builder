@@ -24,9 +24,9 @@ jobs:
       DEVICE: shiba
       KERNEL_DEVICE: shusky
       CUSTOM_KERNEL_VERSION: "1.33"
-      BUILD_AOSP_KERNEL: "1"
 
     steps:
+
       # ================================================
       # 1. Prepare GitHub runner
       # ================================================
@@ -51,9 +51,11 @@ jobs:
       - name: Install Android repo tool
         run: |
           mkdir -p "$HOME/bin"
+
           curl -fsSL \
             https://storage.googleapis.com/git-repo-downloads/repo \
             -o "$HOME/bin/repo"
+
           chmod a+x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
@@ -315,28 +317,33 @@ jobs:
 
           mkdir -p build-report
 
-          echo "Build started: $(date -u)" \
-            | tee build-report/build-status.txt
-
-          echo "Target: //private/devices/google/shusky:zuma_shusky_dist" \
-            | tee -a build-report/build-status.txt
+          {
+            echo "Build started: $(date -u)"
+            echo "Device: $DEVICE"
+            echo "Kernel target: $KERNEL_DEVICE"
+            echo "Kernel version: $CUSTOM_KERNEL_VERSION"
+            echo "Target: //private/devices/google/shusky:zuma_shusky_dist"
+          } | tee build-report/build-status.txt
 
           set -o pipefail
 
           ./private/devices/google/shusky/build_shusky.sh \
+            --kernel_package=@//aosp \
             --//build/kernel/kleaf:use_prebuilt_gki=false \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
             --verbose_failures \
             2>&1 | tee build-report/build.log
 
       # ================================================
-      # 10. Collect diagnostics even after failure
+      # 10. Collect diagnostics after build
       # ================================================
 
       - name: Collect diagnostics after build
         if: always()
         run: |
           cd workspace
+
+          set -u
 
           mkdir -p build-report/diagnostics
           mkdir -p build-report/symbols
@@ -362,6 +369,7 @@ jobs:
 
           cat build-report/diagnostics/files.txt
 
+          echo
           echo "=== KMI errors ==="
 
           if [ -f build-report/build.log ]; then
@@ -374,28 +382,24 @@ jobs:
               build-report/build.log || true
           fi
 
-          echo "=== Module.symvers collection ==="
+          echo
+          echo "=== Module.symvers manifest ==="
 
           find . -type f \
             -name Module.symvers \
             -not -path '*/.git/*' \
-            -print 2>/dev/null \
-            > build-report/symbols/module-symvers-files.txt || true
+            -not -path '*/.repo/*' \
+            -print \
+            > build-report/symbols/module-symvers-files.txt \
+            || true
 
-          while IFS= read -r symvers; do
-            [ -f "$symvers" ] || continue
+          cat build-report/symbols/module-symvers-files.txt
 
-            name="$(echo "$symvers" | sed 's#/#_#g')"
-
-            cp "$symvers" \
-              "build-report/symbols/${name}"
-
-          done < build-report/symbols/module-symvers-files.txt
-
-          echo "Diagnostics collected."
+          echo
+          echo "Diagnostics collection completed."
 
       # ================================================
-      # 11. Analyze exported symbols and ABI list
+      # 11. Analyze Module.symvers and ABI lists
       # ================================================
 
       - name: Analyze exported symbols and ABI list
@@ -403,72 +407,93 @@ jobs:
         run: |
           cd workspace
 
-          mkdir -p build-report/symbol-analysis
+          set -u
+
+          REPORT="build-report/symbol-analysis"
+          MANIFEST="build-report/symbols/module-symvers-files.txt"
+
+          mkdir -p "$REPORT"
 
           SYMBOLS='__dev_kfree_skb_irq|__ioread32_copy|__iowrite32_copy|dev_set_threaded|of_get_mac_address|pci_disable_link_state|pcie_capability_clear_and_set_word|radix_tree_tagged|rfkill_pause_polling|sched_set_fifo_low|skb_to_sgvec|skb_unlink|usb_alloc_urb|usb_anchor_urb|usb_bulk_msg|usb_control_msg|usb_deregister|usb_free_urb|usb_get_dev|usb_init_urb|usb_kill_anchored_urbs|usb_kill_urb|usb_poison_urb|usb_put_dev|usb_register_driver|usb_reset_device|usb_submit_urb|usb_unanchor_urb|usb_unpoison_urb'
 
-          : > build-report/symbol-analysis/module-symbols.txt
-          : > build-report/symbol-analysis/abi-symbols.txt
+          : > "$REPORT/module-symbols.txt"
+          : > "$REPORT/abi-symbols.txt"
+          : > "$REPORT/abi-files.txt"
 
-          echo "=== Searching Module.symvers files ==="
+          echo "=== Module.symvers analysis ==="
 
-          GKI_SYMVERS=$(find . -type f \
-            -path '*/aosp/kernel_aarch64/Module.symvers' \
-            -not -path '*/.git/*' \
-            -print -quit 2>/dev/null || true)
+          if [ ! -s "$MANIFEST" ]; then
+            echo "ERROR: Module.symvers manifest missing or empty." \
+              | tee "$REPORT/module-symbols.txt"
+          else
+            while IFS= read -r file; do
+              [ -n "$file" ] || continue
 
-          SHUSKY_SYMVERS=$(find . -type f \
-            -path '*/shusky/kernel/Module.symvers' \
-            -not -path '*/.git/*' \
-            -print -quit 2>/dev/null || true)
+              echo
+              echo "Checking: $file"
 
-          for file in "$GKI_SYMVERS" "$SHUSKY_SYMVERS"; do
-            if [ -n "$file" ] && [ -f "$file" ]; then
+              if [ ! -f "$file" ]; then
+                echo "MISSING: $file" \
+                  >> "$REPORT/module-symbols.txt"
+                continue
+              fi
+
               {
-                echo "=== $file ==="
+                echo
+                echo "===== $file ====="
 
-                grep -E \
+                grep -nE \
                   "^[^[:space:]]+[[:space:]]+(${SYMBOLS})[[:space:]]" \
                   "$file" || true
 
-              } | tee -a \
-                build-report/symbol-analysis/module-symbols.txt
-            else
-              echo "MODULE.SYMVERS NOT FOUND" \
-                | tee -a \
-                  build-report/symbol-analysis/module-symbols.txt
-            fi
-          done
+              } >> "$REPORT/module-symbols.txt"
 
-          echo "=== Searching ABI symbol lists ==="
+            done < "$MANIFEST"
+          fi
 
-          find . -type f \
-            -name abi_symbollist.raw \
+          echo
+          echo "=== ABI symbol lists ==="
+
+          find out -type f \
+            \( \
+              -name abi_symbollist.raw \
+              -o -name abi_gki_protected_exports_aarch64 \
+            \) \
             -not -path '*/.git/*' \
-            -print \
-            > build-report/symbol-analysis/abi-files.txt
+            -print 2>/dev/null \
+            > "$REPORT/abi-files.txt" || true
 
-          if [ ! -s build-report/symbol-analysis/abi-files.txt ]; then
-            echo "No abi_symbollist.raw found." \
-              | tee \
-                build-report/symbol-analysis/abi-symbols.txt
+          cat "$REPORT/abi-files.txt"
+
+          if [ ! -s "$REPORT/abi-files.txt" ]; then
+            echo "No ABI symbol lists found." \
+              > "$REPORT/abi-symbols.txt"
           else
             while IFS= read -r file; do
               [ -f "$file" ] || continue
 
               {
-                echo "=== $file ==="
+                echo
+                echo "===== $file ====="
 
                 grep -nE \
-                  "^(${SYMBOLS})$" \
+                  "^(${SYMBOLS})([[:space:]]|$)" \
                   "$file" || true
 
-              } | tee -a \
-                build-report/symbol-analysis/abi-symbols.txt
+              } >> "$REPORT/abi-symbols.txt"
 
-            done < build-report/symbol-analysis/abi-files.txt
+            done < "$REPORT/abi-files.txt"
           fi
 
+          echo
+          echo "=== Module.symvers matches ==="
+          cat "$REPORT/module-symbols.txt"
+
+          echo
+          echo "=== ABI matches ==="
+          cat "$REPORT/abi-symbols.txt"
+
+          echo
           echo "Symbol analysis completed."
 
       # ================================================
@@ -481,13 +506,21 @@ jobs:
           cd workspace
 
           DIST="out/shusky/dist"
-          CONFIG="$DIST/.config"
+          CONFIG=""
 
-          test -f "$CONFIG" || {
-            echo "ERROR: dist/.config missing"
-            find out/shusky -name .config -type f
+          if [ -f "$DIST/.config" ]; then
+            CONFIG="$DIST/.config"
+          else
+            CONFIG="$(find out/bazel -type f \
+              -path '*/private/devices/google/shusky/kernel/.config' \
+              -print -quit 2>/dev/null || true)"
+          fi
+
+          if [ -z "$CONFIG" ] || [ ! -f "$CONFIG" ]; then
+            echo "ERROR: Final kernel .config not found."
+            find out -type f -name .config -print || true
             exit 1
-          }
+          fi
 
           cp "$CONFIG" build-report/final.config
 
@@ -552,7 +585,7 @@ jobs:
           echo "Configuration checks passed."
 
       # ================================================
-      # 13. Verify Image and wireless modules
+      # 13. Verify kernel image and wireless modules
       # ================================================
 
       - name: Verify kernel image and wireless modules
@@ -698,6 +731,13 @@ jobs:
           {
             echo "=== Build information ==="
             date -u
+
+            echo
+            echo "=== Build status ==="
+
+            if [ -f build-report/build-status.txt ]; then
+              cat build-report/build-status.txt
+            fi
 
             echo
             echo "=== Dist contents ==="
