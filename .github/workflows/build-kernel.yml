@@ -130,6 +130,31 @@ jobs:
             --no-clone-bundle \
             --no-tags
 
+      - name: Pin kernel/common to the installed Pixel kernel commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE/aosp"
+          KERNEL_COMMON_COMMIT="164ae0b804dd"
+          echo "Requested stock kernel commit: $KERNEL_COMMON_COMMIT"
+          echo "Remote: $(git remote get-url origin)"
+          git fetch --no-tags origin "$KERNEL_COMMON_COMMIT"
+          git checkout --detach FETCH_HEAD
+          ACTUAL_COMMIT="$(git rev-parse HEAD)"
+          case "$ACTUAL_COMMIT" in
+            "$KERNEL_COMMON_COMMIT"*) ;;
+            *)
+              echo "ERROR: fetched commit does not match requested stock kernel commit"
+              echo "Actual: $ACTUAL_COMMIT"
+              exit 1
+              ;;
+          esac
+          echo "Pinned kernel/common commit: $ACTUAL_COMMIT"
+          echo "KERNEL_COMMON_COMMIT=$ACTUAL_COMMIT" >> "$GITHUB_ENV"
+          echo "KERNEL_COMMON_COMMIT=$ACTUAL_COMMIT" >> "$GITHUB_OUTPUT"
+          git log -1 --format=fuller
+          printf '%s\n' "$ACTUAL_COMMIT" > "$REPORT_DIR/kernel-common-commit.txt"
+
       - name: Prepare build reports
         shell: bash
         run: |
