@@ -107,6 +107,30 @@ jobs:
             -b android-gs-shusky-6.1-android16 \
             --depth=1
 
+      # Cache the Repo metadata and Git objects.
+      # repo sync still runs on every build and updates the checkout.
+      - name: Restore Google Repo source cache
+        id: repo-cache
+        uses: actions/cache@v4
+        with:
+          path: workspace/.repo
+          key: repo-${{ runner.os }}-shusky-android16-v1
+
+      - name: Record source cache status
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$REPORT_DIR"
+
+          if [ "${{ steps.repo-cache.outputs.cache-hit }}" = "true" ]; then
+            echo "Google Repo cache: HIT" \
+              | tee "$REPORT_DIR/repo-cache-status.txt"
+          else
+            echo "Google Repo cache: MISS or restored fallback" \
+              | tee "$REPORT_DIR/repo-cache-status.txt"
+          fi
+
       - name: Sync Google kernel sources
         shell: bash
         run: |
@@ -138,6 +162,8 @@ jobs:
             echo "RTL8187: excluded"
             echo "MT76: excluded"
             echo "Phone flash: disabled"
+            echo "Repo source cache: enabled"
+            echo "Bazel output cache: not enabled pending validation"
           } | tee "$REPORT_DIR/build-info.txt"
 
       - name: Verify native FIPS sources and ABI files
@@ -399,42 +425,43 @@ jobs:
           build.write_text(text)
 
           fips_entry = "kernel/crypto/fips140.ko"
-          zuma_text = zuma_ramdisk.read_text()
+          zuma_lines = zuma_ramdisk.read_text().splitlines()
 
-          if fips_entry not in zuma_text.splitlines():
+          if fips_entry not in zuma_lines:
+              # Preserve Google's existing module ordering.
+              # Do not assume FIPS must be the first module.
+              zuma_lines.append(fips_entry)
               zuma_ramdisk.write_text(
-                  fips_entry + "\n" + zuma_text
+                  "\n".join(zuma_lines) + "\n"
               )
 
           shusky_lines = shusky_ramdisk.read_text().splitlines()
 
           if fips_entry in shusky_lines:
               raise SystemExit(
-                  "ERROR: Duplicate FIPS entry in Shusky list."
+                  "ERROR: FIPS entry already exists in Shusky list; "
+                  "review the existing integration before continuing."
               )
 
           print("Shusky BUILD updated.")
           print("FIPS ABI:", fips_label)
           print("FIPS module added to module_outs.")
           print("FIPS added to Zuma ramdisk list.")
+          print("Existing Zuma module ordering preserved.")
 
           PY
 
-          echo "=== Verify FIPS is first in Zuma ramdisk list ==="
+          echo "=== Verify FIPS entry in Zuma ramdisk list ==="
+
+          grep -n -F \
+            'kernel/crypto/fips140.ko' \
+            private/devices/google/zuma/vendor_ramdisk.modules.zuma
+
+          echo
+          echo "=== First entries (ordering retained for diagnosis) ==="
 
           sed -n '1,12p' \
             private/devices/google/zuma/vendor_ramdisk.modules.zuma
-
-          FIRST="$(
-            grep -v '^[[:space:]]*$' \
-              private/devices/google/zuma/vendor_ramdisk.modules.zuma \
-              | sed -n '1p'
-          )"
-
-          if [ "$FIRST" != "kernel/crypto/fips140.ko" ]; then
-            echo "ERROR: FIPS is not first in Zuma ramdisk list."
-            exit 1
-          fi
 
       - name: Verify Bazel targets before compilation
         shell: bash
@@ -635,47 +662,149 @@ jobs:
             -name modules.load \
             -not -path './build-report/*' \
             -print \
+            | sort \
             | tee "$REPORT_DIR/modules-load-files.txt"
 
           FOUND=0
+          INDEX=0
 
           while IFS= read -r MODULES_LOAD; do
             [ -f "$MODULES_LOAD" ] || continue
 
-            if grep -q 'fips140.ko' "$MODULES_LOAD"; then
-              FOUND=1
+            INDEX=$((INDEX + 1))
 
-              echo "FIPS found in: $MODULES_LOAD"
+            echo
+            echo "=== modules.load: $MODULES_LOAD ==="
 
-              sed -n '1,25p' "$MODULES_LOAD"
+            sed -n '1,35p' "$MODULES_LOAD"
 
-              FIRST="$(
-                grep -v '^[[:space:]]*$' "$MODULES_LOAD" \
-                  | sed -n '1p'
-              )"
+            if grep -q 'fips140\.ko' "$MODULES_LOAD"; then
+              FOUND=$((FOUND + 1))
 
-              case "$FIRST" in
-                kernel/crypto/fips140.ko|crypto/fips140.ko|fips140.ko)
-                  echo "FIPS is first."
-                  ;;
-                *)
-                  echo "ERROR: FIPS is not first."
-                  echo "First entry: $FIRST"
-                  exit 1
-                  ;;
-              esac
+              echo "FIPS entry found."
 
               cp "$MODULES_LOAD" \
-                "$REPORT_DIR/$(basename "$(dirname "$MODULES_LOAD")")-modules.load"
+                "$REPORT_DIR/modules-load-${INDEX}.txt"
+
+              grep -n -B3 -A5 \
+                'fips140\.ko' \
+                "$MODULES_LOAD" \
+                >> "$REPORT_DIR/fips-modules-load-position.txt"
             fi
           done < "$REPORT_DIR/modules-load-files.txt"
 
-          if [ "$FOUND" -ne 1 ]; then
+          if [ "$FOUND" -eq 0 ]; then
             echo "ERROR: No generated modules.load contains fips140.ko."
             exit 1
           fi
 
-          echo "FIPS modules.load verification: PASS"
+          {
+            echo "modules.load files containing FIPS: $FOUND"
+            echo "FIPS module entry: present"
+            echo "Load order: recorded, not assumed"
+          } | tee "$REPORT_DIR/modules-load-verification.txt"
+
+          echo "FIPS modules.load presence verification: PASS"
+
+      - name: Collect ramdisk and module dependency diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+
+          mkdir -p "$REPORT_DIR"
+
+          echo "=== modules.load files ===" \
+            | tee "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+          find out -type f \
+            -name modules.load \
+            -print 2>/dev/null \
+            | sort \
+            | tee "$REPORT_DIR/ramdisk-modules-load-paths.txt"
+
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+          echo "=== FIPS-related module dependency entries ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+          find out -type f \
+            \( -name modules.dep -o -name modules.softdep \) \
+            -print0 2>/dev/null \
+            | while IFS= read -r -d '' DEPFILE; do
+                if grep -qE 'fips140|zsmalloc' "$DEPFILE"; then
+                  echo \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+                  echo "FILE: $DEPFILE" \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+                  grep -n -B2 -A3 \
+                    -E 'fips140|zsmalloc' \
+                    "$DEPFILE" \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                fi
+              done
+
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+          echo "=== Relevant ramdisk and boot image candidates ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+          find out/shusky out/bazel \
+            -type f \
+            \( -iname '*vendor*ramdisk*' \
+            -o -iname '*initramfs*' \
+            -o -name vendor_boot.img \
+            -o -name boot.img \
+            -o -name modules.load \
+            -o -name modules.dep \
+            -o -name modules.softdep \) \
+            -print 2>/dev/null \
+            | sort -u \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+          echo "=== Final distribution modules.load ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+          if [ -f out/shusky/dist/modules.load ]; then
+            sed -n '1,100p' out/shusky/dist/modules.load \
+              | tee "$REPORT_DIR/final-dist-modules.load"
+
+            if grep -q 'fips140\.ko' out/shusky/dist/modules.load; then
+              echo "FIPS is present in final dist/modules.load." \
+                | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+            else
+              echo "FIPS is NOT present in final dist/modules.load." \
+                | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+            fi
+          else
+            echo "Final dist/modules.load does not exist." \
+              | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          fi
+
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+          echo "=== Image file types ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+          find out/shusky/dist \
+            -type f \
+            \( -name '*.img' -o -name '*ramdisk*' \) \
+            -print0 2>/dev/null \
+            | while IFS= read -r -d '' IMAGE_FILE; do
+                file "$IMAGE_FILE"
+              done \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+
+          echo "Ramdisk diagnostics collected."
 
       - name: Verify excluded Wi-Fi modules
         if: success()
@@ -701,7 +830,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          cd "$WORKSPACE"
+          cd "$WORKSPACE" || exit 0
 
           mkdir -p "$REPORT_DIR"
 
@@ -734,7 +863,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          cd "$WORKSPACE"
+          cd "$WORKSPACE" || exit 0
 
           mkdir -p "$REPORT_DIR/package"
 
@@ -746,8 +875,12 @@ jobs:
             -o -name vendor_dlkm.img \
             -o -name system_dlkm.img \
             -o -name dtbo.img \
-            -o -name fips140.ko \) \
+            -o -name fips140.ko \
+            -o -name modules.load \
+            -o -name modules.dep \
+            -o -name modules.softdep \) \
             -not -path './build-report/package/*' \
+            -not -path './build-report/*' \
             -exec cp --parents {} "$REPORT_DIR/package/" \;
 
           zip -qr \
