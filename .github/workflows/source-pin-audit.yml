@@ -42,7 +42,7 @@ jobs:
           echo "Expected tag: $GKI_TAG"
           curl --fail --location --silent --show-error \
             --retry 2 --retry-all-errors --connect-timeout 15 --max-time 90 \
-            "$CI_BASE" -o artifact_viewer.html
+            "$CI_BASE/manifest_$EXPECTED_BUILD_ID.xml" -o artifact_viewer.html
           python3 - <<'PY'
           import json, re
           from pathlib import Path
