@@ -126,11 +126,27 @@ jobs:
         run: |
           set -euo pipefail
           cd "$WORKSPACE"
-          repo sync \
-            -c \
-            -j"$(nproc)" \
-            --no-clone-bundle \
-            --no-tags
+          SYNC_OK=0
+          for ATTEMPT in $(seq 1 5); do
+            echo "Repo sync attempt $ATTEMPT/5..."
+            if repo sync \
+              -c \
+              -j"$(nproc)" \
+              --no-clone-bundle \
+              --no-tags; then
+              SYNC_OK=1
+              break
+            fi
+            if [ "$ATTEMPT" -lt 5 ]; then
+              WAIT=$((ATTEMPT * 15))
+              echo "Repo sync failed; retrying in ${WAIT}s."
+              sleep "$WAIT"
+            fi
+          done
+          if [ "$SYNC_OK" -ne 1 ]; then
+            echo "ERROR: Google kernel source sync failed after 5 attempts."
+            exit 1
+          fi
 
       - name: Pin kernel/common to the installed Pixel kernel commit
         shell: bash
@@ -144,17 +160,40 @@ jobs:
           echo "Requested stock kernel commit: $KERNEL_COMMON_COMMIT"
           echo "Search branch: $KERNEL_COMMON_BRANCH"
 
-          # Google Gerrit rejects a fetch by abbreviated, unadvertised SHA.
+          # Google Gerrit can intermittently return HTTP 500 while serving
+          # large shallow-history fetches. Force HTTP/1.1 and retry transient
+          # failures; do not change or guess the required kernel revision.
+          git_fetch_retry() {
+            local label="$1"
+            shift
+            local attempt
+            for attempt in $(seq 1 5); do
+              echo "${label}: fetch attempt ${attempt}/5..."
+              if git -c http.version=HTTP/1.1 fetch --no-tags "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -lt 5 ]; then
+                local wait=$((attempt * 10))
+                echo "Fetch failed; retrying in ${wait}s."
+                sleep "$wait"
+              fi
+            done
+            echo "ERROR: ${label} failed after 5 attempts."
+            return 1
+          }
+
           # Fetch the advertised Pixel branch, then deepen its history until
           # the exact installed-kernel commit is present. The .repo cache
           # preserves these Git objects for subsequent workflow runs.
-          git fetch --no-tags "$KERNEL_COMMON_REMOTE" \
-            "refs/heads/$KERNEL_COMMON_BRANCH"
+          git_fetch_retry "Initial kernel/common branch fetch" \
+            "$KERNEL_COMMON_REMOTE" "refs/heads/$KERNEL_COMMON_BRANCH"
+
           if ! git cat-file -e "$KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
             FOUND=0
             for ATTEMPT in $(seq 1 12); do
               echo "Deepening kernel/common history (round $ATTEMPT/12)..."
-              git fetch --no-tags --deepen=5000 "$KERNEL_COMMON_REMOTE" \
+              git_fetch_retry "History deepening round $ATTEMPT" \
+                --deepen=1000 "$KERNEL_COMMON_REMOTE" \
                 "refs/heads/$KERNEL_COMMON_BRANCH"
               if git cat-file -e "$KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
                 FOUND=1
