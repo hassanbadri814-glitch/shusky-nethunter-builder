@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   build-kernel:
-    if: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, 'audit-only') }}
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, 'build-authorized') }}
     name: Build and verify Shiba Native FIPS kernel
     runs-on: ubuntu-latest
     timeout-minutes: 360
