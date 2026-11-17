@@ -416,7 +416,33 @@ jobs:
             --//build/kernel/kleaf:use_prebuilt_gki=false \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
             --verbose_failures \
+            --sandbox_debug \
             2>&1 | tee "$REPORT_DIR/build.log"
+
+      - name: Preserve generated vendor_kernel_boot image
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          mkdir -p out/shusky/dist
+          mapfile -t VENDOR_KERNEL_BOOT_CANDIDATES < <(
+            find out/bazel/output_user_root \
+              -type f \
+              -path '*/out/android14-6.1/dist/vendor_kernel_boot.img' \
+              -print 2>/dev/null
+          )
+          if [ "${#VENDOR_KERNEL_BOOT_CANDIDATES[@]}" -ne 1 ]; then
+            printf 'Expected exactly one generated vendor_kernel_boot.img; found %s\\n' "${#VENDOR_KERNEL_BOOT_CANDIDATES[@]}"
+            printf '%s\\n' "${VENDOR_KERNEL_BOOT_CANDIDATES[@]}"
+            exit 1
+          fi
+          cp "${VENDOR_KERNEL_BOOT_CANDIDATES[0]}" out/shusky/dist/vendor_kernel_boot.img
+          test "$(dd if=out/shusky/dist/vendor_kernel_boot.img bs=8 count=1 2>/dev/null)" = "VNDRBOOT"
+          sha256sum out/shusky/dist/vendor_kernel_boot.img \
+            | tee "$REPORT_DIR/vendor-kernel-boot-sha256.txt"
+          stat -c 'vendor_kernel_boot.img bytes: %s' out/shusky/dist/vendor_kernel_boot.img \
+            | tee "$REPORT_DIR/vendor-kernel-boot-size.txt"
 
       - name: Verify final FIPS kernel configuration
         if: success()
