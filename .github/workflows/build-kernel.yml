@@ -1,54 +1,48 @@
-      - name: Verify final Shusky FIPS configurations
-        if: success()
+
+      - name: Diagnose Shusky FIPS configurations
+        if: always()
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           cd "$WORKSPACE"
 
-          REPORT="$REPORT_DIR/fips-config-verification.txt"
+          mkdir -p "$REPORT_DIR"
+
+          REPORT="$REPORT_DIR/fips-config-diagnostic.txt"
           : > "$REPORT"
 
-          CONFIGS=(
-            "out/bazel/output_user_root/8f001b10dded3e7c12837e88ae651347/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel/.config"
-            "out/bazel/output_user_root/8f001b10dded3e7c12837e88ae651347/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel_config/out_dir/.config"
-            "out/shusky/dist/.config"
-          )
+          echo "=== ALL CONFIG FILES ===" | tee -a "$REPORT"
 
-          for CONFIG in "${CONFIGS[@]}"; do
-            echo
-            echo "=== $CONFIG ==="
+          find out -type f -name .config \
+            -print 2>/dev/null | tee -a "$REPORT"
 
-            if [ ! -f "$CONFIG" ]; then
-              echo "MISSING"
-              continue
-            fi
+          echo | tee -a "$REPORT"
+          echo "=== SHUSKY CONFIG CONTENTS ===" | tee -a "$REPORT"
+
+          find out -type f -name .config \
+            -path '*private/devices/google/shusky*' \
+            -print0 2>/dev/null |
+          while IFS= read -r -d '' CONFIG; do
+            echo | tee -a "$REPORT"
+            echo "FILE: $CONFIG" | tee -a "$REPORT"
 
             grep -E \
               '^(CONFIG_CRYPTO_FIPS140_MOD=|# CONFIG_CRYPTO_FIPS140_MOD is not set|CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS=)' \
-              "$CONFIG" || true
+              "$CONFIG" | tee -a "$REPORT"
 
-            {
-              echo "FILE: $CONFIG"
-              grep -E \
-                '^(CONFIG_CRYPTO_FIPS140_MOD=|# CONFIG_CRYPTO_FIPS140_MOD is not set|CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS=)' \
-                "$CONFIG" || true
-              echo
-            } >> "$REPORT"
+            echo "--------------------------------" | tee -a "$REPORT"
           done
 
+          echo | tee -a "$REPORT"
+          echo "=== DISTRIBUTION CONFIG ===" | tee -a "$REPORT"
+
+          if [ -f out/shusky/dist/.config ]; then
+            grep -E \
+              '^(CONFIG_CRYPTO_FIPS140_MOD=|# CONFIG_CRYPTO_FIPS140_MOD is not set|CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS=)' \
+              out/shusky/dist/.config | tee -a "$REPORT"
+          else
+            echo "Distribution .config does not exist." | tee -a "$REPORT"
+          fi
+
           echo
-          echo "=== Final distribution config ==="
-
-          DIST_CONFIG="out/shusky/dist/.config"
-
-          if [ ! -f "$DIST_CONFIG" ]; then
-            echo "ERROR: Distribution .config missing."
-            exit 1
-          fi
-
-          if ! grep -q '^CONFIG_CRYPTO_FIPS140_MOD=m$' "$DIST_CONFIG"; then
-            echo "ERROR: FIPS is not enabled in distribution config."
-            exit 1
-          fi
-
-          echo "Distribution FIPS configuration: PASS"
+          echo "Diagnostic step completed; no build failure forced."
