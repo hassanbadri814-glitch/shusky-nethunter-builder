@@ -28,10 +28,7 @@ jobs:
       REPORT_DIR: workspace/build-report
 
     steps:
-
-      # ================================================
       # 1. Prepare GitHub runner
-      # ================================================
 
       - name: Free runner disk space
         run: |
@@ -61,9 +58,7 @@ jobs:
           chmod a+x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      # ================================================
       # 2. Initialize official Google source
-      # ================================================
 
       - name: Initialize Google kernel repository
         run: |
@@ -75,9 +70,7 @@ jobs:
             -u https://android.googlesource.com/kernel/manifest \
             -b android-gs-shusky-6.1-android16
 
-      # ================================================
       # 3. Sync Google kernel source
-      # ================================================
 
       - name: Sync Google kernel source
         timeout-minutes: 120
@@ -92,9 +85,7 @@ jobs:
             -j2 \
             --fail-fast
 
-      # ================================================
       # 4. Verify Google source tree
-      # ================================================
 
       - name: Verify Google source tree
         run: |
@@ -107,10 +98,7 @@ jobs:
           echo "Google Shusky source tree verified."
           repo status
 
-      # ================================================
       # 5. Create safe NetHunter baseline defconfig
-      # RTL8187 and MT76 intentionally excluded
-      # ================================================
 
       - name: Create NetHunter safe baseline defconfig
         run: |
@@ -128,9 +116,7 @@ jobs:
 
           cat private/devices/google/shusky/nethunter_defconfig
 
-      # ================================================
       # 6. Register NetHunter defconfig
-      # ================================================
 
       - name: Register NetHunter defconfig
         run: |
@@ -175,9 +161,7 @@ jobs:
           print("NetHunter defconfig registered.")
           PY
 
-      # ================================================
       # 7. Validate safe baseline and excluded modules
-      # ================================================
 
       - name: Validate NetHunter baseline
         run: |
@@ -196,13 +180,13 @@ jobs:
           echo "=== Confirm excluded wireless modules ==="
 
           if grep -nEi \
-            'rtl8187|mt76|eeprom_93cx6' \
+            '^[[:space:]]*CONFIG_(RTL8187|MT76[^=]*|EEPROM_93CX6)=' \
             private/devices/google/shusky/nethunter_defconfig; then
-            echo "ERROR: Excluded wireless module found in defconfig."
+            echo "ERROR: Excluded wireless module is enabled in defconfig."
             exit 1
           fi
 
-          echo "RTL8187 and MT76 are not requested by this defconfig."
+          echo "PASS: RTL8187, MT76 and EEPROM_93CX6 are not enabled."
 
           echo
           echo "=== Whitespace validation ==="
@@ -252,10 +236,7 @@ jobs:
           print("Source whitespace checks passed.")
           PY
 
-      # ================================================
       # 8. Record original Google image/module rules
-      # No BUILD rules are modified by this step
-      # ================================================
 
       - name: Record Google image and module rules
         run: |
@@ -287,9 +268,7 @@ jobs:
 
           cat build-report/source-audit/image-module-rules.txt
 
-      # ================================================
       # 9. Build official Shusky target
-      # ================================================
 
       - name: Build Shusky Native FIPS kernel
         run: |
@@ -322,9 +301,7 @@ jobs:
             --verbose_failures \
             2>&1 | tee build-report/build.log
 
-      # ================================================
       # 10. Collect build diagnostics
-      # ================================================
 
       - name: Collect build diagnostics
         if: always()
@@ -400,9 +377,7 @@ jobs:
           echo
           echo "Diagnostics collection completed."
 
-      # ================================================
       # 11. Analyze Module.symvers and ABI lists
-      # ================================================
 
       - name: Analyze exported symbols and ABI lists
         if: always()
@@ -481,9 +456,7 @@ jobs:
 
           echo "Symbol analysis completed."
 
-      # ================================================
       # 12. Verify final kernel configuration
-      # ================================================
 
       - name: Verify final kernel configuration
         if: success()
@@ -571,9 +544,7 @@ jobs:
 
           echo "Final configuration checks passed."
 
-      # ================================================
       # 13. Verify kernel image and safe baseline modules
-      # ================================================
 
       - name: Verify kernel image and baseline modules
         if: success()
@@ -611,9 +582,7 @@ jobs:
 
           echo "Baseline kernel image and modules found."
 
-      # ================================================
       # 14. Collect module metadata
-      # ================================================
 
       - name: Collect module metadata
         if: success()
@@ -650,9 +619,7 @@ jobs:
             modinfo -F vermagic "$module" || true
           done > build-report/vermagic-check.txt
 
-      # ================================================
       # 15. Native FIPS module and HMAC evidence
-      # ================================================
 
       - name: Audit native FIPS module and HMAC sections
         if: always()
@@ -794,9 +761,7 @@ jobs:
           echo
           echo "FIPS evidence collection completed."
 
-      # ================================================
       # 16. Audit initramfs and final image paths
-      # ================================================
 
       - name: Audit initramfs and image integration
         if: always()
@@ -879,9 +844,7 @@ jobs:
           echo "File presence and modules.load entries do not alone prove"
           echo "that a module is physically packaged in a boot ramdisk."
 
-      # ================================================
       # 17. Audit vendor_dlkm and system_dlkm outputs
-      # ================================================
 
       - name: Inspect DLKM outputs
         if: always()
@@ -949,9 +912,7 @@ jobs:
           echo
           echo "DLKM inspection completed."
 
-      # ================================================
       # 18. Create consolidated build report
-      # ================================================
 
       - name: Create consolidated build report
         if: always()
@@ -1016,9 +977,7 @@ jobs:
 
           echo "Consolidated report created."
 
-      # ================================================
       # 19. Upload diagnostic and build artifacts
-      # ================================================
 
       - name: Upload Shiba Native FIPS audit artifact
         if: always()
