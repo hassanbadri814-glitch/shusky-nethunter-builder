@@ -14,92 +14,78 @@ jobs:
   source-pin-audit:
     if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'audit-only') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
-      - name: Verify official Shusky manifest and installed common commit
+      - name: Verify the exact installed GKI release identity (audit only)
         shell: bash
         run: |
           set -euo pipefail
-          MANIFEST_COMMIT="e33231175e227ee733489d45e3aae3fb9cf159aa"
-          INSTALLED_PREFIX="164ae0b804dd"
-          MANIFEST_URL="https://android.googlesource.com/kernel/manifest/+/$MANIFEST_COMMIT/default.xml?format=TEXT"
 
-          echo "=== Fetch exact manifest revision (audit-only; no build) ==="
+          # Read from the Pixel 8 itself on 2026-11-16:
+          # 6.1.145-android14-11-gfa1d6308d1fe-ab14691759
+          KERNEL_RELEASE="6.1.145-android14-11-gfa1d6308d1fe-ab14691759"
+          INSTALLED_PREFIX="fa1d6308d1fe"
+          EXPECTED_FULL_SHA="fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462"
+          EXPECTED_BUILD_ID="14691759"
+          GKI_TAG="android14-6.1-2025-09_r22"
+          COMMON_URL="https://android.googlesource.com/kernel/common"
+
+          echo "=== Device-reported kernel identity ==="
+          echo "$KERNEL_RELEASE"
+          case "$KERNEL_RELEASE" in
+            *"g${INSTALLED_PREFIX}-ab${EXPECTED_BUILD_ID}") ;;
+            *) echo "ERROR: release string, commit prefix and build ID disagree"; exit 1 ;;
+          esac
+
+          echo "=== Fetch exact official GKI release tag; no broad history scan ==="
+          git init common
+          git -C common remote add origin "$COMMON_URL"
+          git -C common -c protocol.version=2 -c http.version=HTTP/1.1 \
+            fetch --no-tags origin "refs/tags/$GKI_TAG"
+          TAG_OBJECT="$(git -C common rev-parse FETCH_HEAD)"
+          TAG_TYPE="$(git -C common cat-file -t "$TAG_OBJECT")"
+          FULL_SHA="$(git -C common rev-parse "FETCH_HEAD^{commit}")"
+
+          echo "Tag: $GKI_TAG"
+          echo "Tag object: $TAG_OBJECT"
+          echo "Tag object type: $TAG_TYPE"
+          echo "Resolved commit: $FULL_SHA"
+          test "$TAG_TYPE" = "tag"
+          test "$FULL_SHA" = "$EXPECTED_FULL_SHA"
+          case "$FULL_SHA" in
+            "$INSTALLED_PREFIX"*) ;;
+            *) echo "ERROR: official tag SHA does not match device uname prefix"; exit 1 ;;
+          esac
+
+          git -C common show -s --format='Commit: %H%nDate: %cI%nSubject: %s%nAuthor: %an' "$FULL_SHA"
+          echo
+          echo "=== Verify annotated release metadata ==="
+          git -C common cat-file -p "$TAG_OBJECT"
+          echo
+          echo "Expected GKI build ID: $EXPECTED_BUILD_ID"
+          echo "The uname suffix ab$EXPECTED_BUILD_ID must match the release artifact build ID."
+
+          echo
+          echo "=== Pixel manifest branch is a separate source layer ==="
+          MANIFEST_COMMIT="e33231175e227ee733489d45e3aae3fb9cf159aa"
+          MANIFEST_URL="https://android.googlesource.com/kernel/manifest/+/$MANIFEST_COMMIT/default.xml?format=TEXT"
           curl --retry 3 --retry-all-errors -fsSL "$MANIFEST_URL" | base64 -d > default.xml
-          echo "Manifest commit: $MANIFEST_COMMIT"
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
           root = ET.parse("default.xml").getroot()
           default = root.find("default")
-          if default is None:
-              raise SystemExit("ERROR: manifest has no default revision")
-          default_revision = default.get("revision")
           projects = [p for p in root.findall("project") if p.get("name") == "kernel/common"]
-          if len(projects) != 1:
-              print("Manifest projects:")
-              for p in root.findall("project"):
-                  print(ET.tostring(p, encoding="unicode"))
-              raise SystemExit(f"ERROR: expected one kernel/common project, found {len(projects)}")
+          if default is None or len(projects) != 1:
+              raise SystemExit("ERROR: could not resolve the Pixel manifest kernel/common project")
           project = projects[0]
-          revision = project.get("revision", default_revision)
+          revision = project.get("revision", default.get("revision"))
           if not revision:
-              raise SystemExit("ERROR: kernel/common has no resolvable revision")
-          print("Kernel/common project:", ET.tostring(project, encoding="unicode"))
-          print("Manifest default revision:", default_revision)
-          print("Manifest kernel/common revision:", revision)
-          with open("common-revision.txt", "w") as f:
-              f.write(revision)
+              raise SystemExit("ERROR: no kernel/common revision in Pixel manifest")
+          print("Pixel manifest commit:", "e33231175e227ee733489d45e3aae3fb9cf159aa")
+          print("Pixel manifest kernel/common revision:", revision)
+          print("Note: this is the Pixel device-source manifest branch; it is not the GKI release tag above.")
           PY
-          COMMON_REVISION="$(cat common-revision.txt)"
 
-          echo "=== Fetch only the authoritative kernel/common branch history ==="
-          git init common
-          git -C common remote add origin https://android.googlesource.com/kernel/common
-          FOUND=0
-          for SINCE in 2026-04-01 2026-01-01 2025-01-01; do
-            echo "Attempting $COMMON_REVISION history since $SINCE"
-            if git -C common -c protocol.version=2 -c http.version=HTTP/1.1 fetch --no-tags --shallow-since="$SINCE" origin "refs/heads/$COMMON_REVISION"; then
-              if git -C common cat-file -e "$INSTALLED_PREFIX^{commit}" 2>/dev/null; then
-                FOUND=1
-                break
-              fi
-            else
-              echo "Fetch window failed; continue with wider history."
-            fi
-          done
-
-          if [ "$FOUND" -ne 1 ]; then
-            echo "NOT FOUND on authoritative Pixel manifest branch: $COMMON_REVISION"
-            echo "Fetched tip:"
-            git -C common log -1 --format='%H %cI %s' FETCH_HEAD || true
-            echo "=== Secondary hypothesis test: GKI android14-6.1 branch (NOT the Pixel manifest checkout) ==="
-            if git -C common -c protocol.version=2 -c http.version=HTTP/1.1 fetch --filter=blob:none --no-tags --shallow-since=2025-01-01 origin refs/heads/android14-6.1; then
-              if git -C common cat-file -e "$INSTALLED_PREFIX^{commit}" 2>/dev/null; then
-                GKI_SHA="$(git -C common rev-parse "$INSTALLED_PREFIX^{commit}")"
-                echo "FOUND on related GKI branch android14-6.1: $GKI_SHA"
-                git -C common show -s --format='Commit: %H%nDate: %cI%nSubject: %s%nAuthor: %an' "$GKI_SHA"
-                echo "RESULT: GKI BRANCH MATCH ONLY; NOT PROOF OF PIXEL MANIFEST SOURCE"
-              else
-                echo "NOT FOUND on related GKI branch android14-6.1 either."
-                echo "Fetched GKI tip:"
-                git -C common log -1 --format='%H %cI %s' FETCH_HEAD || true
-                exit 1
-              fi
-            else
-              echo "ERROR: could not fetch related GKI branch for secondary test."
-              exit 1
-            fi
-            exit 0
-          fi
-
-          FULL_SHA="$(git -C common rev-parse "$INSTALLED_PREFIX^{commit}")"
-          case "$FULL_SHA" in
-            "$INSTALLED_PREFIX"*) ;;
-            *) echo "ERROR: resolved SHA does not match installed prefix"; exit 1 ;;
-          esac
-
-          echo "=== VERIFIED SOURCE IDENTITY ==="
-          echo "Installed kernel/common prefix: $INSTALLED_PREFIX"
-          echo "Resolved full SHA: $FULL_SHA"
-          git -C common show -s --format='Commit: %H%nDate: %cI%nSubject: %s%nAuthor: %an' "$FULL_SHA"
-          echo "RESULT: PASS"
+          echo
+          echo "RESULT: PASS — device uname prefix and build ID match the exact official GKI tag."
+          echo "No kernel compilation, image generation, flashing or phone changes were performed."
