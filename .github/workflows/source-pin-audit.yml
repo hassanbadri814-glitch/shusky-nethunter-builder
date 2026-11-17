@@ -24,7 +24,7 @@ jobs:
           INSTALLED_PREFIX="164ae0b804dd"
           MANIFEST_URL="https://android.googlesource.com/kernel/manifest/+/$MANIFEST_COMMIT/default.xml?format=TEXT"
 
-          echo "=== Fetch exact manifest revision ==="
+          echo "=== Fetch exact manifest revision (audit-only; no build) ==="
           curl --retry 3 --retry-all-errors -fsSL "$MANIFEST_URL" | base64 -d > default.xml
           echo "Manifest commit: $MANIFEST_COMMIT"
           python3 - <<'PY'
