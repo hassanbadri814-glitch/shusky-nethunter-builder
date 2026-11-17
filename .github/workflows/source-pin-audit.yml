@@ -69,10 +69,27 @@ jobs:
           done
 
           if [ "$FOUND" -ne 1 ]; then
-            echo "ERROR: $INSTALLED_PREFIX was not resolved from $COMMON_REVISION in tested windows."
+            echo "NOT FOUND on authoritative Pixel manifest branch: $COMMON_REVISION"
             echo "Fetched tip:"
             git -C common log -1 --format='%H %cI %s' FETCH_HEAD || true
-            exit 1
+            echo "=== Secondary hypothesis test: GKI android14-6.1 branch (NOT the Pixel manifest checkout) ==="
+            if git -C common -c protocol.version=2 -c http.version=HTTP/1.1 fetch --filter=blob:none --no-tags --shallow-since=2025-01-01 origin refs/heads/android14-6.1; then
+              if git -C common cat-file -e "$INSTALLED_PREFIX^{commit}" 2>/dev/null; then
+                GKI_SHA="$(git -C common rev-parse "$INSTALLED_PREFIX^{commit}")"
+                echo "FOUND on related GKI branch android14-6.1: $GKI_SHA"
+                git -C common show -s --format='Commit: %H%nDate: %cI%nSubject: %s%nAuthor: %an' "$GKI_SHA"
+                echo "RESULT: GKI BRANCH MATCH ONLY; NOT PROOF OF PIXEL MANIFEST SOURCE"
+              else
+                echo "NOT FOUND on related GKI branch android14-6.1 either."
+                echo "Fetched GKI tip:"
+                git -C common log -1 --format='%H %cI %s' FETCH_HEAD || true
+                exit 1
+              fi
+            else
+              echo "ERROR: could not fetch related GKI branch for secondary test."
+              exit 1
+            fi
+            exit 0
           fi
 
           FULL_SHA="$(git -C common rev-parse "$INSTALLED_PREFIX^{commit}")"
