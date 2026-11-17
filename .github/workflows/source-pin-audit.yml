@@ -14,78 +14,99 @@ jobs:
   source-pin-audit:
     if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'audit-only') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - name: Verify the exact installed GKI release identity (audit only)
+      - name: Reconstruct exact GKI build manifest and compare Pixel source pin (audit only)
         shell: bash
         run: |
           set -euo pipefail
 
-          # Read from the Pixel 8 itself on 2026-11-16:
-          # 6.1.145-android14-11-gfa1d6308d1fe-ab14691759
+          # Exact output read from the Pixel 8 on 2026-11-16.
           KERNEL_RELEASE="6.1.145-android14-11-gfa1d6308d1fe-ab14691759"
           INSTALLED_PREFIX="fa1d6308d1fe"
           EXPECTED_FULL_SHA="fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462"
           EXPECTED_BUILD_ID="14691759"
           GKI_TAG="android14-6.1-2025-09_r22"
-          COMMON_URL="https://android.googlesource.com/kernel/common"
+          CI_BASE="https://ci.android.com/builds/submitted/$EXPECTED_BUILD_ID/kernel_aarch64/latest"
 
-          echo "=== Device-reported kernel identity ==="
+          echo "=== 1. Verify exact device uname tuple ==="
           echo "$KERNEL_RELEASE"
           case "$KERNEL_RELEASE" in
             *"g${INSTALLED_PREFIX}-ab${EXPECTED_BUILD_ID}") ;;
-            *) echo "ERROR: release string, commit prefix and build ID disagree"; exit 1 ;;
+            *) echo "ERROR: device release, commit prefix and build ID disagree"; exit 1 ;;
           esac
 
-          echo "=== Fetch exact official GKI release tag; no broad history scan ==="
-          git init common
-          git -C common remote add origin "$COMMON_URL"
-          git -C common -c protocol.version=2 -c http.version=HTTP/1.1 \
-            fetch --no-tags origin "refs/tags/$GKI_TAG"
-          TAG_OBJECT="$(git -C common rev-parse FETCH_HEAD)"
-          TAG_TYPE="$(git -C common cat-file -t "$TAG_OBJECT")"
-          FULL_SHA="$(git -C common rev-parse "FETCH_HEAD^{commit}")"
-
-          echo "Tag: $GKI_TAG"
-          echo "Tag object: $TAG_OBJECT"
-          echo "Tag object type: $TAG_TYPE"
-          echo "Resolved commit: $FULL_SHA"
-          test "$TAG_TYPE" = "tag"
-          test "$FULL_SHA" = "$EXPECTED_FULL_SHA"
-          case "$FULL_SHA" in
-            "$INSTALLED_PREFIX"*) ;;
-            *) echo "ERROR: official tag SHA does not match device uname prefix"; exit 1 ;;
-          esac
-
-          git -C common show -s --format='Commit: %H%nDate: %cI%nSubject: %s%nAuthor: %an' "$FULL_SHA"
           echo
-          echo "=== Verify annotated release metadata ==="
-          git -C common cat-file -p "$TAG_OBJECT"
-          echo
-          echo "Expected GKI build ID: $EXPECTED_BUILD_ID"
-          echo "The uname suffix ab$EXPECTED_BUILD_ID must match the release artifact build ID."
+          echo "=== 2. Download Google's pinned manifest for this exact GKI build ==="
+          echo "Build ID: $EXPECTED_BUILD_ID"
+          echo "Expected tag: $GKI_TAG"
+          curl --fail --location --silent --show-error \
+            --retry 2 --retry-all-errors --connect-timeout 15 --max-time 120 \
+            "$CI_BASE/manifest_$EXPECTED_BUILD_ID.xml" -o gki_manifest.xml
+          test -s gki_manifest.xml
+          sha256sum gki_manifest.xml
+          echo "Downloaded manifest size: $(wc -c < gki_manifest.xml) bytes"
 
           echo
-          echo "=== Pixel manifest branch is a separate source layer ==="
-          MANIFEST_COMMIT="e33231175e227ee733489d45e3aae3fb9cf159aa"
-          MANIFEST_URL="https://android.googlesource.com/kernel/manifest/+/$MANIFEST_COMMIT/default.xml?format=TEXT"
-          curl --retry 3 --retry-all-errors -fsSL "$MANIFEST_URL" | base64 -d > default.xml
+          echo "=== 3. Parse every exact project pin from the GKI manifest ==="
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
-          root = ET.parse("default.xml").getroot()
+          from pathlib import Path
+
+          expected = "fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462"
+          root = ET.parse("gki_manifest.xml").getroot()
           default = root.find("default")
-          projects = [p for p in root.findall("project") if p.get("name") == "kernel/common"]
-          if default is None or len(projects) != 1:
-              raise SystemExit("ERROR: could not resolve the Pixel manifest kernel/common project")
-          project = projects[0]
-          revision = project.get("revision", default.get("revision"))
-          if not revision:
-              raise SystemExit("ERROR: no kernel/common revision in Pixel manifest")
-          print("Pixel manifest commit:", "e33231175e227ee733489d45e3aae3fb9cf159aa")
-          print("Pixel manifest kernel/common revision:", revision)
-          print("Note: this is the Pixel device-source manifest branch; it is not the GKI release tag above.")
+          projects = root.findall("project")
+          if not projects:
+              raise SystemExit("ERROR: downloaded GKI manifest contains no project entries")
+
+          def revision(p):
+              return p.get("revision") or (default.get("revision") if default is not None else None)
+
+          matches = [p for p in projects if p.get("name") == "kernel/common" or p.get("path") == "common"]
+          if len(matches) != 1:
+              raise SystemExit(f"ERROR: expected exactly one kernel/common project, found {len(matches)}")
+
+          common = matches[0]
+          common_revision = revision(common)
+          print("GKI manifest kernel/common name:", common.get("name"))
+          print("GKI manifest kernel/common path:", common.get("path"))
+          print("GKI manifest kernel/common revision:", common_revision)
+          if common_revision != expected:
+              raise SystemExit("ERROR: GKI manifest kernel/common pin does not equal the device uname full SHA")
+
+          print("\nOther build-critical manifest pins:")
+          for p in projects:
+              name = p.get("name", "")
+              path = p.get("path", "")
+              if any(x in name.lower() or x in path.lower() for x in ("kernel/build", "kernel/config", "prebuilts/clang", "build-tools")):
+                  print(f"{name} | path={path} | revision={revision(p)}")
+          print("\nGKI manifest parse: PASS")
           PY
 
           echo
-          echo "RESULT: PASS — device uname prefix and build ID match the exact official GKI tag."
-          echo "No kernel compilation, image generation, flashing or phone changes were performed."
+          echo "=== 4. Independently resolve the Pixel 8 device-source manifest ==="
+          PIXEL_MANIFEST_COMMIT="e33231175e227ee733489d45e3aae3fb9cf159aa"
+          PIXEL_MANIFEST_URL="https://android.googlesource.com/kernel/manifest/+/$PIXEL_MANIFEST_COMMIT/default.xml?format=TEXT"
+          curl --fail --location --silent --show-error \
+            --retry 2 --retry-all-errors --connect-timeout 15 --max-time 90 \
+            "$PIXEL_MANIFEST_URL" -o pixel-default.xml.b64
+          base64 -d pixel-default.xml.b64 > pixel-default.xml
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("pixel-default.xml").getroot()
+          default = root.find("default")
+          projects = [p for p in root.findall("project") if p.get("name") == "kernel/common"]
+          if default is None or len(projects) != 1:
+              raise SystemExit("ERROR: cannot resolve kernel/common in Pixel manifest")
+          p = projects[0]
+          revision = p.get("revision") or default.get("revision")
+          print("Pixel device manifest commit: e33231175e227ee733489d45e3aae3fb9cf159aa")
+          print("Pixel kernel/common project path:", p.get("path"))
+          print("Pixel kernel/common branch:", revision)
+          print("This branch is a separate device-source layer; do not substitute it for the pinned GKI release manifest.")
+          PY
+
+          echo
+          echo "RESULT: GKI manifest kernel/common pin matches the exact full SHA in the device uname."
+          echo "No compilation, image generation, flashing, or phone changes were performed."
