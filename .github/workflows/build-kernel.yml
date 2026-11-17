@@ -392,6 +392,12 @@ jobs:
           cd "$WORKSPACE"
           cat > \
             private/devices/google/shusky/nethunter_fips_defconfig <<'EOF'
+          CONFIG_MODULES=y
+          CONFIG_MODVERSIONS=y
+          CONFIG_WLAN=y
+          CONFIG_CFG80211=m
+          CONFIG_MAC80211=m
+          CONFIG_USB=y
           CONFIG_CRYPTO_FIPS140_MOD=m
           EOF
           echo "=== FIPS defconfig ==="
@@ -596,11 +602,427 @@ jobs:
               '^(CONFIG_CRYPTO_FIPS140_MOD=|# CONFIG_CRYPTO_FIPS140_MOD is not set|CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS=)' \
               "$CONFIG" || true
           } | tee "$REPORT"
-          if ! grep -q '^CONFIG_CRYPTO_FIPS140_MOD=m$' "$CONFIG"; then
-            echo "ERROR: CONFIG_CRYPTO_FIPS140_MOD=m is missing."
+          EXPECTED_CONFIG=(
+            "CONFIG_MODULES=y"
+            "CONFIG_MODVERSIONS=y"
+            "CONFIG_WLAN=y"
+            "CONFIG_CFG80211=m"
+            "CONFIG_MAC80211=m"
+            "CONFIG_USB=y"
+            "CONFIG_CRYPTO_FIPS140_MOD=m"
+          )
+          for SETTING in "${EXPECTED_CONFIG[@]}"; do
+            if ! grep -qxF "$SETTING" "$CONFIG"; then
+              echo "ERROR: Required safe-baseline setting is missing: $SETTING"
+              exit 1
+            fi
+            echo "$SETTING" >> "$REPORT"
+          done
+          if grep -Eq '^CONFIG_KSU=(y|m)
+          if [ -f out/shusky/dist/.config ]; then
+            if grep -q '^CONFIG_CRYPTO_FIPS140_MOD=m$' \
+              out/shusky/dist/.config; then
+              echo "Distribution config: FIPS enabled."
+            else
+              echo "WARNING: FIPS setting not present in dist/.config."
+              echo "The Shusky kernel config itself passed."
+            fi
+          else
+            echo "Distribution .config not available."
+          fi
+          echo "FIPS_CONFIG=$CONFIG" >> "$GITHUB_ENV"
+          echo
+          echo "Native Shusky FIPS configuration: PASS"
+
+      - name: Verify generated native FIPS module
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          MODULE="$(find . -type f \
+            -path '*/crypto/fips140.ko' \
+            -not -path './build-report/*' \
+            -print -quit)"
+          if [ -z "$MODULE" ]; then
+            echo "ERROR: Native crypto/fips140.ko not found."
             exit 1
           fi
-          echo "CONFIG_CRYPTO_FIPS140_MOD=m" >> "$REPORT"
+          echo "FIPS module: $MODULE"
+          sha256sum "$MODULE" \
+            | tee "$REPORT_DIR/fips140-sha256.txt"
+          file "$MODULE" \
+            | tee "$REPORT_DIR/fips140-file.txt"
+          readelf -S "$MODULE" \
+            | tee "$REPORT_DIR/fips140-sections.txt"
+          grep -q '\.init\.rela\.text' \
+            "$REPORT_DIR/fips140-sections.txt"
+          grep -q '\.init\.rela\.rodata' \
+            "$REPORT_DIR/fips140-sections.txt"
+          echo "FIPS relocation sections: PASS"
+
+      - name: Collect FIPS HMAC execution evidence
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          grep -n -B8 -A18 \
+            'CMD_FIPS140_GEN_HMAC\|cmd_gen_hmac\|fips140.ko' \
+            aosp/arch/arm64/Makefile.postlink \
+            | tee "$REPORT_DIR/fips-hmac-rule.txt"
+          grep -niE \
+            'fips140_gen_hmac|cmd_gen_hmac|gen_hmac' \
+            "$REPORT_DIR/build.log" \
+            | tee "$REPORT_DIR/fips-hmac-build-log.txt" || true
+          find . -type f \
+            \( -name '*.cmd' -o -name '*.log' \) \
+            -not -path './build-report/*' \
+            -print0 \
+            | xargs -0 -r grep -niE \
+              'fips140_gen_hmac|cmd_gen_hmac|gen_hmac' \
+              2>/dev/null \
+            | tee "$REPORT_DIR/fips-hmac-command-evidence.txt" || true
+          echo "HMAC evidence collected."
+          echo "Evidence must be reviewed; this step alone does not prove execution."
+
+      - name: Verify generated vendor ramdisk modules.load
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          find . -type f \
+            -name modules.load \
+            -not -path './build-report/*' \
+            -print \
+            | sort \
+            | tee "$REPORT_DIR/modules-load-files.txt"
+          FOUND=0
+          INDEX=0
+          while IFS= read -r MODULES_LOAD; do
+            [ -f "$MODULES_LOAD" ] || continue
+            INDEX=$((INDEX + 1))
+            echo
+            echo "=== modules.load: $MODULES_LOAD ==="
+            sed -n '1,35p' "$MODULES_LOAD"
+            if grep -q 'fips140\.ko' "$MODULES_LOAD"; then
+              FOUND=$((FOUND + 1))
+              echo "FIPS entry found."
+              cp "$MODULES_LOAD" \
+                "$REPORT_DIR/modules-load-${INDEX}.txt"
+              grep -n -B3 -A5 \
+                'fips140\.ko' \
+                "$MODULES_LOAD" \
+                >> "$REPORT_DIR/fips-modules-load-position.txt"
+            fi
+          done < "$REPORT_DIR/modules-load-files.txt"
+          if [ "$FOUND" -eq 0 ]; then
+            echo "ERROR: No generated modules.load contains fips140.ko."
+            exit 1
+          fi
+          {
+            echo "modules.load files containing FIPS: $FOUND"
+            echo "FIPS module entry: present"
+            echo "Load order: recorded, not assumed"
+          } | tee "$REPORT_DIR/modules-load-verification.txt"
+          echo "FIPS modules.load presence verification: PASS"
+
+      - name: Collect ramdisk and module dependency diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR"
+          echo "=== modules.load files ===" \
+            | tee "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out -type f \
+            -name modules.load \
+            -print 2>/dev/null \
+            | sort \
+            | tee "$REPORT_DIR/ramdisk-modules-load-paths.txt"
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== FIPS-related module dependency entries ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out -type f \
+            \( -name modules.dep -o -name modules.softdep \) \
+            -print0 2>/dev/null \
+            | while IFS= read -r -d '' DEPFILE; do
+                if grep -qE 'fips140|zsmalloc' "$DEPFILE"; then
+                  echo \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                  echo "FILE: $DEPFILE" \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                  grep -n -B2 -A3 \
+                    -E 'fips140|zsmalloc' \
+                    "$DEPFILE" \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                fi
+              done
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Relevant ramdisk and boot image candidates ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out/shusky out/bazel \
+            -type f \
+            \( -iname '*vendor*ramdisk*' \
+            -o -iname '*initramfs*' \
+            -o -name vendor_boot.img \
+            -o -name boot.img \
+            -o -name modules.load \
+            -o -name modules.dep \
+            -o -name modules.softdep \) \
+            -print 2>/dev/null \
+            | sort -u \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Final distribution modules.load ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          if [ -f out/shusky/dist/modules.load ]; then
+            sed -n '1,100p' out/shusky/dist/modules.load \
+              | tee "$REPORT_DIR/final-dist-modules.load"
+            if grep -q 'fips140\.ko' out/shusky/dist/modules.load; then
+              echo "FIPS is present in final dist/modules.load." \
+                | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+            else
+              echo "FIPS is NOT present in final dist/modules.load." \
+                | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+            fi
+          else
+            echo "Final dist/modules.load does not exist." \
+              | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          fi
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Image file types ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out/shusky/dist \
+            -type f \
+            \( -name '*.img' -o -name '*ramdisk*' \) \
+            -print0 2>/dev/null \
+            | while IFS= read -r -d '' IMAGE_FILE; do
+                file "$IMAGE_FILE"
+              done \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "Ramdisk diagnostics collected."
+
+      - name: Verify excluded Wi-Fi modules
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          if find . -type f \
+            \( -name '*rtl8187*.ko' \
+            -o -name '*mt76*.ko' \) \
+            -not -path './build-report/*' \
+            | grep .; then
+            echo "ERROR: RTL8187 or MT76 module found."
+            exit 1
+          fi
+          echo "RTL8187: excluded"
+          echo "MT76: excluded"
+          for MODULE in cfg80211.ko mac80211.ko; do
+            if ! find . -type f -name "$MODULE" -not -path './build-report/*' | grep -q .; then
+              echo "ERROR: Required NetHunter wireless module missing: $MODULE"
+              exit 1
+            fi
+            echo "$MODULE: present"
+          done
+          if find . -type f -name 'ksu.ko' -not -path './build-report/*' | grep -q .; then
+            echo "ERROR: Unexpected KernelSU module found."
+            exit 1
+          fi
+          echo "KernelSU module: absent"
+
+      - name: Collect build outputs and reports
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR"
+          {
+            echo "Build report generated: $(date -u)"
+            echo
+            echo "=== FIPS module candidates ==="
+            find . -type f \
+              -path '*/crypto/fips140.ko' \
+              -not -path './build-report/*' \
+              -exec sha256sum {} \;
+            echo
+            echo "=== Kernel images ==="
+            find . -type f \
+              \( -name Image \
+              -o -name Image.lz4 \
+              -o -name boot.img \
+              -o -name vendor_boot.img \
+              -o -name vendor_kernel_boot.img \
+              -o -name vendor_dlkm.img \
+              -o -name system_dlkm.img \
+              -o -name dtbo.img \) \
+              -print
+          } | tee "$REPORT_DIR/build-summary.txt"
+
+      - name: Package Native FIPS build artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR/package"
+          find . -type f \
+            \( -name Image \
+            -o -name Image.lz4 \
+            -o -name boot.img \
+            -o -name vendor_boot.img \
+            -o -name vendor_kernel_boot.img \
+            -o -name vendor_dlkm.img \
+            -o -name system_dlkm.img \
+            -o -name dtbo.img \
+            -o -name fips140.ko \
+            -o -name modules.load \
+            -o -name modules.dep \
+            -o -name modules.softdep \) \
+            -not -path './build-report/package/*' \
+            -not -path './build-report/*' \
+            -exec cp --parents {} "$REPORT_DIR/package/" \;
+          zip -qr \
+            shiba-nethunter-native-fips-build-test.zip \
+            build-report \
+            2>/dev/null || true
+
+      - name: Upload Native FIPS build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-nethunter-native-fips-build-test
+          path: |
+            workspace/build-report/
+            workspace/shiba-nethunter-native-fips-build-test.zip
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14
+
+  # audit-only route: keep the native kernel build job skipped for audit commits.
+  audit-existing-build:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, 'audit-only')) }}
+    name: Audit completed Native FIPS build #79
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download completed build #73 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: shiba-nethunter-native-fips-build-test
+          repository: ${{ github.repository }}
+          run-id: 44181178426
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: audit-input
+
+      - name: Install image inspection tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cpio lz4 e2fsprogs file python3 curl unzip zstd
+
+      - name: Unpack and audit vendor_kernel_boot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit-report unpacked
+          # The artifact contains intermediate Bazel copies as well as the final dist image.
+          # Audit only the final image copied into out/shusky/dist.
+          mapfile -t IMAGES < <(find audit-input -type f \
+            -path '*/build-report/package/out/shusky/dist/vendor_kernel_boot.img' \
+            -print)
+          if [ "${#IMAGES[@]}" -ne 1 ]; then
+            echo "Expected exactly one packaged final-dist vendor_kernel_boot.img; found ${#IMAGES[@]}"
+            printf '%s\\n' "${IMAGES[@]}"
+            exit 1
+          fi
+          IMAGE="${IMAGES[0]}"
+          {
+            echo "Source: $IMAGE"
+            stat -c 'Size: %s bytes' "$IMAGE"
+            sha256sum "$IMAGE"
+            file "$IMAGE"
+            test "$(dd if="$IMAGE" bs=8 count=1 2>/dev/null)" = "VNDRBOOT"
+            echo "VNDRBOOT header: PASS"
+          } | tee audit-report/vendor-kernel-boot-image.txt
+
+          curl -fsSL             'https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/unpack_bootimg.py?format=TEXT'             | base64 -d > unpack_bootimg.py
+          python3 unpack_bootimg.py --boot_img "$IMAGE" --out unpacked             2>&1 | tee audit-report/unpack-bootimg.txt
+
+          find unpacked -maxdepth 2 -type f -printf '%p %s bytes\n'             | sort | tee audit-report/unpacked-files.txt
+
+          mkdir -p ramdisk-extracted
+          INDEX=0
+          while IFS= read -r -d '' PART; do
+            INDEX=$((INDEX + 1))
+            DEST="ramdisk-extracted/part-$INDEX"
+            mkdir -p "$DEST"
+            echo "=== $PART ===" | tee -a audit-report/ramdisk-extraction.txt
+            file "$PART" | tee -a audit-report/ramdisk-extraction.txt
+            if lz4 -t "$PART" >/dev/null 2>&1; then
+              lz4 -dc "$PART" | (cd "$DEST" && cpio -idm --quiet)
+            elif gzip -t "$PART" >/dev/null 2>&1; then
+              gzip -dc "$PART" | (cd "$DEST" && cpio -idm --quiet)
+            elif zstd -t "$PART" >/dev/null 2>&1; then
+              zstd -dc "$PART" | (cd "$DEST" && cpio -idm --quiet)
+            else
+              (cd "$DEST" && cpio -idm --quiet < "$GITHUB_WORKSPACE/$PART")                 || echo "Could not unpack as uncompressed cpio: $PART"                   | tee -a audit-report/ramdisk-extraction.txt
+            fi
+            find "$DEST" -type f \( -name modules.load -o -name modules.dep               -o -name modules.softdep -o -name fips140.ko               -o -name ufs-pixel-fips140.ko -o -name iovad-vendor-hooks.ko \)               -printf '%p %s bytes\n'               | tee -a audit-report/ramdisk-relevant-files.txt
+          done < <(find unpacked -maxdepth 1 -type f -name 'vendor_ramdisk*' -print0 | sort -z)
+
+          find ramdisk-extracted -type f -name modules.load -print0             | while IFS= read -r -d '' F; do
+                echo "=== $F ==="
+                nl -ba "$F"
+              done > audit-report/all-modules-load.txt
+          find ramdisk-extracted -type f \( -name modules.dep -o -name modules.softdep \) -print0             | while IFS= read -r -d '' F; do
+                echo "=== $F ==="
+                grep -n -E 'fips140|ufs-pixel-fips140|iovad-vendor-hooks' "$F" || true
+              done > audit-report/fips-module-dependencies.txt
+
+          {
+            echo "=== Required module presence ==="
+            for M in fips140.ko ufs-pixel-fips140.ko; do
+              if find ramdisk-extracted -type f -name "$M" | grep -q .; then
+                echo "$M: PRESENT"
+              else
+                echo "$M: MISSING"
+              fi
+            done
+            echo
+            echo "=== Load order references ==="
+            grep -n -E 'fips140|ufs-pixel-fips140' audit-report/all-modules-load.txt || true
+          } | tee audit-report/fips-presence-and-order.txt
+
+          # Record hashes and sizes of all key packaged images.
+          find audit-input -type f \( -name boot.img -o -name dtbo.img             -o -name system_dlkm.img -o -name vendor_dlkm.img             -o -name vendor_kernel_boot.img \) -print0             | sort -z | xargs -0 -r sha256sum             > audit-report/key-image-sha256.txt
+          find audit-input -type f \( -name boot.img -o -name dtbo.img             -o -name system_dlkm.img -o -name vendor_dlkm.img             -o -name vendor_kernel_boot.img \) -printf '%f %s bytes\n'             | sort > audit-report/key-image-sizes.txt
+
+          zip -qr shiba-native-fips-audit-report.zip audit-report
+      - name: Upload focused audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-audit-run73
+          path: |
+            audit-report/
+            shiba-native-fips-audit-report.zip
+          if-no-files-found: error
+          retention-days: 14
+ "$CONFIG"; then
+            echo "ERROR: KernelSU is enabled in the kernel config."
+            grep -n '^CONFIG_KSU=' "$CONFIG"
+            exit 1
+          fi
+          echo "CONFIG_KSU: disabled (not enabled in kernel config)" | tee -a "$REPORT"
           echo
           echo "=== Distribution config comparison ==="
           if [ -f out/shusky/dist/.config ]; then
