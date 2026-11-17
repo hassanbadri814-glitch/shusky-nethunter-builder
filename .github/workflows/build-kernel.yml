@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   build-kernel:
-    if: ${{ !contains(github.event.head_commit.message, 'audit-only') }}
+    if: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, 'audit-only') }}
     name: Build and verify Shiba Native FIPS kernel
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -772,8 +772,8 @@ jobs:
 
   # audit-only route: keep the native kernel build job skipped for audit commits.
   audit-existing-build:
-    if: ${{ contains(github.event.head_commit.message, 'audit-only') }}
-    name: Audit completed Native FIPS build #73
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, 'audit-only')) }}
+    name: Audit completed Native FIPS build #79
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -782,7 +782,7 @@ jobs:
         with:
           name: shiba-nethunter-native-fips-build-test
           repository: ${{ github.repository }}
-          run-id: 44175241004
+          run-id: 44181178426
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: audit-input
 
