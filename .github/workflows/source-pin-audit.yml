@@ -27,14 +27,30 @@ jobs:
           echo "=== Fetch exact manifest revision ==="
           curl --retry 3 --retry-all-errors -fsSL "$MANIFEST_URL" | base64 -d > default.xml
           echo "Manifest commit: $MANIFEST_COMMIT"
-          grep -n -E '<default|<project path="common"|<superproject' default.xml
-
-          COMMON_REVISION="$(sed -n 's/.*<project path="common" name="kernel\/common" revision="\([^"]*\)".*/\1/p' default.xml | head -n1)"
-          if [ -z "$COMMON_REVISION" ]; then
-            echo "ERROR: Could not resolve kernel/common revision from exact manifest."
-            exit 1
-          fi
-          echo "Manifest kernel/common revision: $COMMON_REVISION"
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("default.xml").getroot()
+          default = root.find("default")
+          if default is None:
+              raise SystemExit("ERROR: manifest has no default revision")
+          default_revision = default.get("revision")
+          projects = [p for p in root.findall("project") if p.get("name") == "kernel/common"]
+          if len(projects) != 1:
+              print("Manifest projects:")
+              for p in root.findall("project"):
+                  print(ET.tostring(p, encoding="unicode"))
+              raise SystemExit(f"ERROR: expected one kernel/common project, found {len(projects)}")
+          project = projects[0]
+          revision = project.get("revision", default_revision)
+          if not revision:
+              raise SystemExit("ERROR: kernel/common has no resolvable revision")
+          print("Kernel/common project:", ET.tostring(project, encoding="unicode"))
+          print("Manifest default revision:", default_revision)
+          print("Manifest kernel/common revision:", revision)
+          with open("common-revision.txt", "w") as f:
+              f.write(revision)
+          PY
+          COMMON_REVISION="$(cat common-revision.txt)"
 
           echo "=== Fetch only the authoritative kernel/common branch history ==="
           git init common
