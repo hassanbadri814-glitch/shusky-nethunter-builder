@@ -157,6 +157,21 @@ jobs:
           echo
           echo "Pinned Pixel Kleaf prebuilt target definitions:"
           grep -n -C 3 -E 'download_or_build|kernel_aarch64_images|additional_artifacts' pixel-kleaf-common-kernels.bzl | head -160
+          echo
+          echo "Exact Kleaf target-generation block:"
+          sed -n '1030,1090p' pixel-kleaf-common-kernels.bzl
+          echo
+          echo "Exact Shusky base-kernel and dist references:"
+          sed -n '70,95p;180,235p' shusky-BUILD.bazel
+          PIXEL_COMMON_COMMIT="8769cc47188c3bdca2a34d39ba0f39a945b85465"
+          curl --fail --location --silent --show-error \
+            --retry 2 --retry-all-errors --connect-timeout 15 --max-time 90 \
+            "https://android.googlesource.com/kernel/common/+/$PIXEL_COMMON_COMMIT/BUILD.bazel?format=TEXT" \
+            -o pixel-common-build.bazel.b64
+          base64 -d pixel-common-build.bazel.b64 > pixel-common-BUILD.bazel
+          echo
+          echo "Pixel common BUILD target declarations:"
+          grep -n -C 2 -E 'kernel_aarch64_gki_boot_image|kernel_aarch64_images|kernel_aarch64_headers|define_common_kernels' pixel-common-BUILD.bazel | head -140
 
           echo "RESULT: GKI manifest kernel/common pin matches the exact full SHA in the device uname."
           echo "No compilation, image generation, flashing, or phone changes were performed."
