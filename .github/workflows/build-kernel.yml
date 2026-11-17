@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   build-kernel:
-    if: ${{ !contains(github.event.head_commit.message, '[audit-only]') }}
+    if: ${{ !contains(github.event.head_commit.message, 'audit-only') }}
     name: Build and verify Shiba Native FIPS kernel
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -771,7 +771,7 @@ jobs:
           retention-days: 14
 
   audit-existing-build:
-    if: ${{ contains(github.event.head_commit.message, '[audit-only]') }}
+    if: ${{ contains(github.event.head_commit.message, 'audit-only') }}
     name: Audit completed Native FIPS build #73
     runs-on: ubuntu-latest
     timeout-minutes: 30
