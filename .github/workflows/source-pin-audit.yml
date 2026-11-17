@@ -172,6 +172,12 @@ jobs:
           echo
           echo "Pixel common BUILD target declarations:"
           grep -n -C 2 -E 'kernel_aarch64_gki_boot_image|kernel_aarch64_images|kernel_aarch64_headers|define_common_kernels' pixel-common-BUILD.bazel | head -140
+          echo
+          echo "Kleaf GKI download config and generated target suffixes:"
+          grep -n -A90 -B8 'GKI_DOWNLOAD_CONFIGS' pixel-kleaf-common-kernels.bzl | head -150
+          echo
+          echo "Kleaf GKI boot-image target declarations:"
+          grep -n -C 4 -E 'gki_boot_image|boot_img_archive|gki_artifacts' pixel-kleaf-common-kernels.bzl | head -180
 
           echo "RESULT: GKI manifest kernel/common pin matches the exact full SHA in the device uname."
           echo "No compilation, image generation, flashing, or phone changes were performed."
