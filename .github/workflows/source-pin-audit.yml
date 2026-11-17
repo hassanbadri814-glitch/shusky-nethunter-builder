@@ -138,5 +138,25 @@ jobs:
           PY
 
           echo
+          echo
+          echo "=== 5. Inspect the exact Pixel Shusky BUILD graph and its pinned Kleaf rules ==="
+          SHUSKY_BUILD_COMMIT="a88953f657282d6e52c6c0b3669ca3a890907518"
+          PIXEL_KLEAF_COMMIT="6483b5a6b74251440b266536c2dbc902a4fa3cf2"
+          curl --fail --location --silent --show-error \
+            --retry 2 --retry-all-errors --connect-timeout 15 --max-time 90 \
+            "https://android.googlesource.com/kernel/devices/google/shusky/+/$SHUSKY_BUILD_COMMIT/BUILD.bazel?format=TEXT" \
+            -o shusky-build.bazel.b64
+          base64 -d shusky-build.bazel.b64 > shusky-BUILD.bazel
+          curl --fail --location --silent --show-error \
+            --retry 2 --retry-all-errors --connect-timeout 15 --max-time 90 \
+            "https://android.googlesource.com/kernel/build/+/$PIXEL_KLEAF_COMMIT/kleaf/common_kernels.bzl?format=TEXT" \
+            -o pixel-kleaf-common-kernels.bzl.b64
+          base64 -d pixel-kleaf-common-kernels.bzl.b64 > pixel-kleaf-common-kernels.bzl
+          echo "Official Shusky BUILD references:"
+          grep -nE 'base_kernel[[:space:]]*=|base_kernel_images[[:space:]]*=|kernel_aarch64(_images|_gki_boot_image|_headers)?' shusky-BUILD.bazel | head -80
+          echo
+          echo "Pinned Pixel Kleaf prebuilt target definitions:"
+          grep -n -C 3 -E 'download_or_build|kernel_aarch64_images|additional_artifacts' pixel-kleaf-common-kernels.bzl | head -160
+
           echo "RESULT: GKI manifest kernel/common pin matches the exact full SHA in the device uname."
           echo "No compilation, image generation, flashing, or phone changes were performed."
