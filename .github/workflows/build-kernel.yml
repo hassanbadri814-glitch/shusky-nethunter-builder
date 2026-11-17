@@ -11,7 +11,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: shiba-nethunter-native-fips
+  group: shiba-nethunter-native-fips-audit-routing
   cancel-in-progress: false
 
 jobs:
