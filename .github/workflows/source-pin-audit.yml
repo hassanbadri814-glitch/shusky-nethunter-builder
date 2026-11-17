@@ -46,6 +46,9 @@ jobs:
           test -s gki_manifest.xml
           sha256sum gki_manifest.xml
           echo "Downloaded manifest size: $(wc -c < gki_manifest.xml) bytes"
+          echo "=== Raw manifest response (first 100 lines) ==="
+          nl -ba gki_manifest.xml | sed -n "1,100p"
+          echo "=== End raw manifest response ==="
 
           echo
           echo "=== 3. Parse every exact project pin from the GKI manifest ==="
