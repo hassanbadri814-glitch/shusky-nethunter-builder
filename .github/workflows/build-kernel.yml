@@ -1,67 +1,54 @@
-
-      - name: Verify final FIPS kernel configuration
+      - name: Verify final Shusky FIPS configurations
         if: success()
         shell: bash
         run: |
           set -euo pipefail
           cd "$WORKSPACE"
 
-          echo "=== Find all generated kernel configurations ==="
+          REPORT="$REPORT_DIR/fips-config-verification.txt"
+          : > "$REPORT"
 
-          find . -type f \
-            -name .config \
-            -not -path './build-report/*' \
-            -print \
-            | tee "$REPORT_DIR/config-files.txt"
+          CONFIGS=(
+            "out/bazel/output_user_root/8f001b10dded3e7c12837e88ae651347/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel/.config"
+            "out/bazel/output_user_root/8f001b10dded3e7c12837e88ae651347/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel_config/out_dir/.config"
+            "out/shusky/dist/.config"
+          )
 
-          echo
-          echo "=== Inspect FIPS setting in every configuration ==="
-
-          FOUND=0
-          MATCHED_CONFIG=""
-
-          while IFS= read -r CONFIG; do
-            [ -f "$CONFIG" ] || continue
-
+          for CONFIG in "${CONFIGS[@]}"; do
             echo
-            echo "----------------------------------------"
-            echo "CONFIG: $CONFIG"
-            echo "----------------------------------------"
+            echo "=== $CONFIG ==="
+
+            if [ ! -f "$CONFIG" ]; then
+              echo "MISSING"
+              continue
+            fi
 
             grep -E \
               '^(CONFIG_CRYPTO_FIPS140_MOD=|# CONFIG_CRYPTO_FIPS140_MOD is not set|CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS=)' \
-              "$CONFIG" || echo "FIPS setting not present"
+              "$CONFIG" || true
 
-            if grep -q \
-              '^CONFIG_CRYPTO_FIPS140_MOD=m$' \
-              "$CONFIG"; then
-
-              FOUND=1
-              MATCHED_CONFIG="$CONFIG"
-
-              echo "RESULT: FIPS MODULE ENABLED"
-            fi
-
-          done < "$REPORT_DIR/config-files.txt"
+            {
+              echo "FILE: $CONFIG"
+              grep -E \
+                '^(CONFIG_CRYPTO_FIPS140_MOD=|# CONFIG_CRYPTO_FIPS140_MOD is not set|CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS=)' \
+                "$CONFIG" || true
+              echo
+            } >> "$REPORT"
+          done
 
           echo
+          echo "=== Final distribution config ==="
 
-          if [ "$FOUND" -ne 1 ]; then
-            echo "ERROR: No generated .config contains:"
-            echo "CONFIG_CRYPTO_FIPS140_MOD=m"
-            echo
-            echo "The FIPS defconfig fragment may not have"
-            echo "been applied to the Shusky kernel configuration."
+          DIST_CONFIG="out/shusky/dist/.config"
+
+          if [ ! -f "$DIST_CONFIG" ]; then
+            echo "ERROR: Distribution .config missing."
             exit 1
           fi
 
-          echo "FIPS_CONFIG=$MATCHED_CONFIG" >> "$GITHUB_ENV"
+          if ! grep -q '^CONFIG_CRYPTO_FIPS140_MOD=m$' "$DIST_CONFIG"; then
+            echo "ERROR: FIPS is not enabled in distribution config."
+            exit 1
+          fi
 
-          {
-            echo "Native FIPS config: PASS"
-            echo "Verified config: $MATCHED_CONFIG"
-            echo "CONFIG_CRYPTO_FIPS140_MOD=m"
-          } | tee "$REPORT_DIR/fips-config.txt"
-
-          echo
-          echo "Native FIPS configuration verification: PASS"
+          echo "Distribution FIPS configuration: PASS"
