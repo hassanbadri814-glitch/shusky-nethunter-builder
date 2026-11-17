@@ -160,50 +160,59 @@ jobs:
           echo "Requested stock kernel commit: $KERNEL_COMMON_COMMIT"
           echo "Search branch: $KERNEL_COMMON_BRANCH"
 
-          # Google Gerrit can intermittently return HTTP 500 while serving
-          # large shallow-history fetches. Force HTTP/1.1 and retry transient
-          # failures; do not change or guess the required kernel revision.
+          # Avoid large --deepen requests: Google Gerrit returned HTTP 500
+          # for every 1000-commit history expansion. Try protocol v2 and
+          # progressively wider date-bounded shallow fetches instead.
           git_fetch_retry() {
             local label="$1"
             shift
             local attempt
-            for attempt in $(seq 1 5); do
-              echo "${label}: fetch attempt ${attempt}/5..."
-              if git -c http.version=HTTP/1.1 fetch --no-tags "$@"; then
+            for attempt in $(seq 1 3); do
+              echo "${label}: protocol v2 / HTTP2 attempt ${attempt}/3..."
+              if git -c protocol.version=2 -c http.version=HTTP/2 \
+                fetch --no-tags "$@"; then
                 return 0
               fi
-              if [ "$attempt" -lt 5 ]; then
-                local wait=$((attempt * 10))
+              echo "${label}: retrying with HTTP/1.1..."
+              if git -c protocol.version=2 -c http.version=HTTP/1.1 \
+                fetch --no-tags "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                local wait=$((attempt * 15))
                 echo "Fetch failed; retrying in ${wait}s."
                 sleep "$wait"
               fi
             done
-            echo "ERROR: ${label} failed after 5 attempts."
+            echo "ERROR: ${label} failed after protocol/transport retries."
             return 1
           }
 
-          # Fetch the advertised Pixel branch, then deepen its history until
-          # the exact installed-kernel commit is present. The .repo cache
-          # preserves these Git objects for subsequent workflow runs.
           git_fetch_retry "Initial kernel/common branch fetch" \
             "$KERNEL_COMMON_REMOTE" "refs/heads/$KERNEL_COMMON_BRANCH"
 
           if ! git cat-file -e "$KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
             FOUND=0
-            for ATTEMPT in $(seq 1 12); do
-              echo "Deepening kernel/common history (round $ATTEMPT/12)..."
-              git_fetch_retry "History deepening round $ATTEMPT" \
-                --deepen=1000 "$KERNEL_COMMON_REMOTE" \
+            # The installed Pixel build is from 2026-05. Start with the
+            # smallest useful history window, then widen only if necessary.
+            for SINCE in 2026-05-01 2026-04-01 2026-01-01 2025-01-01; do
+              echo "Fetching kernel/common history since $SINCE..."
+              git_fetch_retry "History fetch since $SINCE" \
+                --shallow-since="$SINCE" "$KERNEL_COMMON_REMOTE" \
                 "refs/heads/$KERNEL_COMMON_BRANCH"
               if git cat-file -e "$KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
                 FOUND=1
+                echo "Exact installed Pixel commit found with since=$SINCE."
                 break
               fi
+              echo "Target commit not present yet; widening history."
             done
             if [ "$FOUND" -ne 1 ]; then
-              echo "ERROR: installed Pixel commit is not reachable within the fetched branch history."
+              echo "ERROR: installed Pixel commit is not reachable in tested date windows."
               echo "Requested: $KERNEL_COMMON_COMMIT"
               echo "Branch: $KERNEL_COMMON_BRANCH"
+              echo "Fetched refs:"
+              git log -1 --format='%H %cI %s' FETCH_HEAD || true
               exit 1
             fi
           fi
@@ -225,6 +234,7 @@ jobs:
             echo "Requested commit: $KERNEL_COMMON_COMMIT"
             echo "Resolved commit: $ACTUAL_COMMIT"
             echo "Source branch: $KERNEL_COMMON_BRANCH"
+            echo "Fetch strategy: protocol v2; HTTP/2 then HTTP/1.1; shallow-since windows"
           } | tee "$REPORT_DIR/kernel-common-commit.txt"
 
       # Persist Bazel's action cache between runs. The Repo cache above
