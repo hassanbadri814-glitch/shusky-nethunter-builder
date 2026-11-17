@@ -104,7 +104,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: workspace/.repo
-          key: repo-${{ runner.os }}-shusky-android16-v1
+          key: repo-${{ runner.os }}-shusky-android16-v2
+          restore-keys: |
+            repo-${{ runner.os }}-shusky-android16-v1
 
       - name: Record source cache status
         shell: bash
