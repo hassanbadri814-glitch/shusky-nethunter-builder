@@ -138,8 +138,11 @@ jobs:
           cd "$WORKSPACE/aosp"
           KERNEL_COMMON_COMMIT="164ae0b804dd"
           echo "Requested stock kernel commit: $KERNEL_COMMON_COMMIT"
-          echo "Remote: $(git remote get-url origin)"
-          git fetch --no-tags origin "$KERNEL_COMMON_COMMIT"
+          # Repo-managed projects may have no configured remote. Use Google's
+          # canonical kernel/common URL explicitly rather than assuming "origin".
+          KERNEL_COMMON_REMOTE="https://android.googlesource.com/kernel/common"
+          echo "Remote: $KERNEL_COMMON_REMOTE"
+          git fetch --no-tags "$KERNEL_COMMON_REMOTE" "$KERNEL_COMMON_COMMIT"
           git checkout --detach FETCH_HEAD
           ACTUAL_COMMIT="$(git rev-parse HEAD)"
           case "$ACTUAL_COMMIT" in
