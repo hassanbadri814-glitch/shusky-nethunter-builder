@@ -1,0 +1,72 @@
+name: Audit Pixel 8 installed kernel source pin
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/source-pin-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-pin-audit:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'audit-only') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Verify official Shusky manifest and installed common commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST_COMMIT="e33231175e227ee733489d45e3aae3fb9cf159aa"
+          INSTALLED_PREFIX="164ae0b804dd"
+          MANIFEST_URL="https://android.googlesource.com/kernel/manifest/+/$MANIFEST_COMMIT/default.xml?format=TEXT"
+
+          echo "=== Fetch exact manifest revision ==="
+          curl --retry 3 --retry-all-errors -fsSL "$MANIFEST_URL" | base64 -d > default.xml
+          echo "Manifest commit: $MANIFEST_COMMIT"
+          grep -n -E '<default|<project path="common"|<superproject' default.xml
+
+          COMMON_REVISION="$(sed -n 's/.*<project path="common" name="kernel\/common" revision="\([^"]*\)".*/\1/p' default.xml | head -n1)"
+          if [ -z "$COMMON_REVISION" ]; then
+            echo "ERROR: Could not resolve kernel/common revision from exact manifest."
+            exit 1
+          fi
+          echo "Manifest kernel/common revision: $COMMON_REVISION"
+
+          echo "=== Fetch only the authoritative kernel/common branch history ==="
+          git init common
+          git -C common remote add origin https://android.googlesource.com/kernel/common
+          FOUND=0
+          for SINCE in 2026-04-01 2026-01-01 2025-01-01; do
+            echo "Attempting $COMMON_REVISION history since $SINCE"
+            if git -C common -c protocol.version=2 -c http.version=HTTP/1.1 fetch --no-tags --shallow-since="$SINCE" origin "refs/heads/$COMMON_REVISION"; then
+              if git -C common cat-file -e "$INSTALLED_PREFIX^{commit}" 2>/dev/null; then
+                FOUND=1
+                break
+              fi
+            else
+              echo "Fetch window failed; continue with wider history."
+            fi
+          done
+
+          if [ "$FOUND" -ne 1 ]; then
+            echo "ERROR: $INSTALLED_PREFIX was not resolved from $COMMON_REVISION in tested windows."
+            echo "Fetched tip:"
+            git -C common log -1 --format='%H %cI %s' FETCH_HEAD || true
+            exit 1
+          fi
+
+          FULL_SHA="$(git -C common rev-parse "$INSTALLED_PREFIX^{commit}")"
+          case "$FULL_SHA" in
+            "$INSTALLED_PREFIX"*) ;;
+            *) echo "ERROR: resolved SHA does not match installed prefix"; exit 1 ;;
+          esac
+
+          echo "=== VERIFIED SOURCE IDENTITY ==="
+          echo "Installed kernel/common prefix: $INSTALLED_PREFIX"
+          echo "Resolved full SHA: $FULL_SHA"
+          git -C common show -s --format='Commit: %H%nDate: %cI%nSubject: %s%nAuthor: %an' "$FULL_SHA"
+          echo "RESULT: PASS"
