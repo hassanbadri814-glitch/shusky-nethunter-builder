@@ -37,24 +37,51 @@ jobs:
           esac
 
           echo
-          echo "=== 2. Download Google's pinned manifest for this exact GKI build ==="
+          echo "=== 2. Resolve the exact manifest artifact URL from Google's CI artifact page ==="
           echo "Build ID: $EXPECTED_BUILD_ID"
           echo "Expected tag: $GKI_TAG"
           curl --fail --location --silent --show-error \
+            --retry 2 --retry-all-errors --connect-timeout 15 --max-time 90 \
+            "$CI_BASE" -o artifact_viewer.html
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+
+          html = Path("artifact_viewer.html").read_text()
+          match = re.search(r"var JSVariables = (\{.*?\});", html, re.S)
+          if not match:
+              raise SystemExit("ERROR: Google CI artifact page did not expose JSVariables")
+          data = json.loads(match.group(1))
+          expected = {
+              "artifact": "manifest_14691759.xml",
+              "buildId": "14691759",
+              "target": "kernel_aarch64",
+              "branch": "aosp_kernel-common-android14-6.1-2025-09",
+          }
+          for key, value in expected.items():
+              actual = data.get(key)
+              print(f"CI {key}: {actual}")
+              if actual != value:
+                  raise SystemExit(f"ERROR: CI artifact metadata mismatch for {key}: {actual!r}")
+          url = data.get("artifactUrl")
+          if not url or not url.startswith("https://storage.googleapis.com/"):
+              raise SystemExit("ERROR: CI did not provide a valid Google Storage artifact URL")
+          Path("manifest-artifact-url.txt").write_text(url)
+          print("CI artifact metadata: PASS; signed URL intentionally not printed")
+          PY
+
+          MANIFEST_URL="$(cat manifest-artifact-url.txt)"
+          curl --fail --location --silent --show-error \
             --retry 2 --retry-all-errors --connect-timeout 15 --max-time 120 \
-            "$CI_BASE/manifest_$EXPECTED_BUILD_ID.xml" -o gki_manifest.xml
+            "$MANIFEST_URL" -o gki_manifest.xml
           test -s gki_manifest.xml
           sha256sum gki_manifest.xml
-          echo "Downloaded manifest size: $(wc -c < gki_manifest.xml) bytes"
-          echo "=== Raw manifest response (first 100 lines) ==="
-          nl -ba gki_manifest.xml | sed -n "1,100p"
-          echo "=== End raw manifest response ==="
+          echo "Downloaded pinned manifest size: $(wc -c < gki_manifest.xml) bytes"
 
           echo
-          echo "=== 3. Parse every exact project pin from the GKI manifest ==="
+          echo "=== 3. Parse and verify exact project pins from the GKI manifest ==="
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
-          from pathlib import Path
 
           expected = "fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462"
           root = ET.parse("gki_manifest.xml").getroot()
@@ -84,7 +111,7 @@ jobs:
               path = p.get("path", "")
               if any(x in name.lower() or x in path.lower() for x in ("kernel/build", "kernel/config", "prebuilts/clang", "build-tools")):
                   print(f"{name} | path={path} | revision={revision(p)}")
-          print("\nGKI manifest parse: PASS")
+          print("\nGKI manifest parse and kernel/common pin: PASS")
           PY
 
           echo
