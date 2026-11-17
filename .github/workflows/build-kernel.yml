@@ -797,10 +797,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p audit-report unpacked
-          mapfile -t IMAGES < <(find audit-input -type f -name vendor_kernel_boot.img -print)
+          # The artifact contains intermediate Bazel copies as well as the final dist image.
+          # Audit only the final image copied into out/shusky/dist.
+          mapfile -t IMAGES < <(find audit-input -type f \
+            -path '*/build-report/package/out/shusky/dist/vendor_kernel_boot.img' \
+            -print)
           if [ "${#IMAGES[@]}" -ne 1 ]; then
-            echo "Expected exactly one packaged vendor_kernel_boot.img; found ${#IMAGES[@]}"
-            printf '%s\n' "${IMAGES[@]}"
+            echo "Expected exactly one packaged final-dist vendor_kernel_boot.img; found ${#IMAGES[@]}"
+            printf '%s\\n' "${IMAGES[@]}"
             exit 1
           fi
           IMAGE="${IMAGES[0]}"
