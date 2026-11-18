@@ -601,6 +601,16 @@ jobs:
                       for number, line in hits:
                           print(f"{number}: {line}")
 
+          print("ARM64 Kconfig context for automatic ARM64_MODULE_PLTS selection:")
+          arm64_kconfig = Path("aosp/arch/arm64/Kconfig")
+          if arm64_kconfig.is_file():
+              lines = arm64_kconfig.read_text(errors="replace").splitlines()
+              for i, line in enumerate(lines):
+                  if "select ARM64_MODULE_PLTS" in line:
+                      print("--- aosp/arch/arm64/Kconfig ---")
+                      for j in range(max(0, i - 5), min(len(lines), i + 4)):
+                          print(f"{j + 1}: {lines[j]}")
+
           print("FIPS compiler and ARM64 module-PLT Kconfig definitions:")
           for base in (Path("aosp"), Path("common")):
               for path in base.rglob("Kconfig*"):
