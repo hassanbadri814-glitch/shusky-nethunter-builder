@@ -1,67 +1,31 @@
-[![Build Pixel 8 Pro (shusky) - NetHunter + KernelSU Next + ConfigFS](https://github.com/stoag/shusky-nethunter-builder/actions/workflows/build-kernel.yml/badge.svg)](https://github.com/stoag/shusky-nethunter-builder/actions/workflows/build-kernel.yml)
- 
- · · · **Tweaker Kernel** · · ·    
- **Made for Pixel 8 Pro (shusky)**
- 
- It should work on both the Pixel 8 (shiba) and Pixel 8 Pro (husky) but I've only tested on the 8 Pro.
- 
- This kernel integrates NetHunter & KernelSU Next with native support for wireless packet injection drivers,
- USB Arsenal and ConfigFS into the official Google AOSP kernel sources via Bazel.
+# Pixel 8 (shiba) NetHunter Native FIPS builder
 
+This repository builds the Google Shusky/Zuma kernel distribution for the **Pixel 8 (shiba)**, using the Android 16 Shusky source manifest and the matching Google GKI 2.0 base.
 
- · · · Key Features · · · 
+## Build baseline
 
-- **Automated Cloud Compilation:** Syncs official Google `android-gs-shusky-6.1-android16` source code
-- and builds the kernel in isolated runner environments using Bazel (`build_shusky.sh`).
-- **Inline KernelSU Next (`CONFIG_KSU=y`):** Core root hooks are compiled directly into the C kernel binary,
-- keeping the `init_boot` ramdisk 100% factory stock for stealth and stability.
-- **Wireless Injection (mac80211):** Patched `mac80211` subsystem allowing frame injection and
-- monitor mode on external USB Wi-Fi adapters.
-- **Advanced Out-of-Tree Wi-Fi Drivers:** Pre-compiles and packages kernel modules for Realtek 8812au and
-- Mediatek MT76 usb wireless adapters.
-- **Modern Realtek Injection & GKI Bypass:** Features native integration of **RTL8812AU**  drivers. Includes
-- a custom C-source macro bypass to get around Google's- strict GKI File I/O security blocks. 
-- **USB Arsenal & ConfigFS:** Native support for USB HID Gadget attacks (DuckHunter), Mass Storage emulation,
-- ECM, and ACM serial interfaces.
-- **Filesystem & Network Optimizations:** BBR TCP congestion control, WireGuard VPN support, TTL/HL override
-- capabilities, and NTFS3/exFAT filesystem support.
-- **Clean AnyKernel3 Packaging:** Automatically packages the compiled `Image.lz4` and custom `.ko` modules
-- into a flashable AK3 zip for easy installation.
+- Device: Pixel 8 `shiba` (Tensor G3 / Zuma)
+- Android baseline: Android 16, SDK 36
+- GKI family: `android14-6.1`
+- Target GKI build: `14691759`
+- Exact `kernel/common` source commit: `fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462`
+- Kernel release prefix: `6.1.145-android14-11-gfa1d6308d1fe`
+- Native FIPS: in-tree `fips140.ko`, HMAC post-link verification, Pixel KMI plus FIPS ABI checks
+- KernelSU Inline: deliberately disabled (`CONFIG_KSU` unset)
 
- · · · Disclaimer · · · 
- 
- Use at your own risk!!!
- Flashing custom kernels carries inherent risks of bootloops or soft-bricks if not done properly. 
- This kernel was built for and tested on CP1A.260505.505, which is the May security patch on Android 16.
- **DO NOT DOWNGRADE YOUR DEVICE IF YOU FLASH THIS BUILD.**
- It can trigger Android's Anti-Rollback protection and cause a hard brick as documented in various threads
- on XDA. I strongly suggest reading as many threads as is necessary to familiarize yourself with the various
- methods for restoring your device from a bootloop state and downloading the factory image for your device
- prior flashing any custom kernel. 
- 
- · · · Flashing Instructions · · · 
- 
- ### Prerequisites
-* Unlocked bootloader.
-* Pixel 8 / 8 Pro running the required Android 16 build.
-* Root access (to use Kernel Flasher / FKM) or a custom recovery.
+The GKI kernel image and all vendor modules must be built against the same kernel source revision/KMI. A successful CI job is not sufficient by itself: the produced module release and symbol CRCs must also be audited against the selected GKI base.
 
-### Installation
-1. Download the latest release extractME zip file.
-2. Extract the contents to a location on your phones storage that you can easily find.
-3. Open **Kernel Flasher**.
-4. Tap **Flash AK3** and select the `Tweaker-Kernel-twk.v1.02-AK3-Boot.zip` file.
-5. DO NOT REBOOT! Once that finishes, go back to the main menu of Kernel Flasher and tap **Flash Image**.
-6. Flash the extracted `.img` files to their corresponding partitions:
-   - Flash `vendor_dlkm.img` -> to the `vendor_dlkm` partition
-   - Flash `system_dlkm.img` -> to the `system_dlkm` partition
-   - Flash `vendor_kernel_boot.img` -> to the `vendor_kernel_boot` partition
-7. Reboot and Enjoy! :D
+## KernelSU-Next
 
-Woot!! twk.v1.07!
-Successfully added Realtek rtl8812au drivers for my AWUS036ACH usb wireless adapter. 
-:D
+KernelSU-Next is **not compiled into this kernel** and is not added to `vendor_kernel_boot` or the DLKM images.
 
-and now... 
+For this Pixel 8 GKI 2.0 device, KernelSU-Next LKM is a separate installation step managed by the KernelSU-Next app. It uses the matching `android14-6.1` LKM and patches the device's `init_boot` image. Keep the kernel build and LKM installation separate; do not enable KernelSU Inline just to restore LKM root.
 
-zZZzzZzZZzZzzz...
+The build workflow does not patch or flash `init_boot`, and it never flashes the phone.
+
+## Safety
+
+- The workflow only builds and packages images; it does not flash any device.
+- Preserve the exact stock images for the active firmware before any manual flash.
+- Do not flash an artifact unless its kernel release, module compatibility, partition sizes, and independent audit have passed.
+- A green GitHub build is not proof that Android boots. Runtime boot and FIPS status still require device-side verification.
