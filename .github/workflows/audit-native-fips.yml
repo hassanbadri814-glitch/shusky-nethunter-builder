@@ -24,10 +24,10 @@ jobs:
       - name: Select and verify source build
         id: source
         env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
-          EVENT_NAME: \${{ github.event_name }}
-          EVENT_RUN_ID: \${{ github.event.workflow_run.id }}
-          COMMIT_MESSAGE: \${{ github.event.head_commit.message }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         shell: bash
         run: |
           set -euo pipefail
@@ -62,8 +62,8 @@ jobs:
 
       - name: Download exact artifact and verify GitHub SHA-256
         env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
-          SOURCE_RUN_ID: \${{ steps.source.outputs.SOURCE_RUN_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN_ID: ${{ steps.source.outputs.SOURCE_RUN_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -95,8 +95,8 @@ jobs:
 
       - name: Audit final images, DLKM filesystems, and Native FIPS ramdisk
         env:
-          SOURCE_RUN_ID: \${{ steps.source.outputs.SOURCE_RUN_ID }}
-          SOURCE_SHA: \${{ steps.source.outputs.SOURCE_SHA }}
+          SOURCE_RUN_ID: ${{ steps.source.outputs.SOURCE_RUN_ID }}
+          SOURCE_SHA: ${{ steps.source.outputs.SOURCE_SHA }}
         shell: bash
         run: |
           set -euo pipefail
@@ -210,7 +210,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shiba-native-fips-independent-audit-\${{ steps.source.outputs.SOURCE_RUN_ID }}
+          name: shiba-native-fips-independent-audit-${{ steps.source.outputs.SOURCE_RUN_ID }}
           path: audit-report/
           if-no-files-found: warn
           retention-days: 30
