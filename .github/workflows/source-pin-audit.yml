@@ -394,6 +394,9 @@ jobs:
           test -x tools/bazel
           ABI_LABEL="$(cat fips-abi-label.txt)"
           BAZEL=(tools/bazel --output_user_root="$RUNNER_TEMP/bazel-query-root")
+          # Match the production build invocation exactly. Without this flag,
+          # Kleaf falls back to its default GKI build-number map (13202960).
+          GKI_FLAGS=(--use_prebuilt_gki=14691759)
           QUERY_FLAGS=(--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build --no//private/devices/google/common:download_prebuilt_gki_fips140)
           echo "=== Native FIPS ABI target ==="
           "${BAZEL[@]}" query "$ABI_LABEL" --output=label
@@ -411,7 +414,7 @@ jobs:
           echo "=== Confirm patched Shusky dependency graph contains all required prebuilt-aware aliases ==="
           # `query` is unconfigured and traverses inactive select() branches, including the unavailable FIPS prebuilt.
           # `cquery` resolves the actual configuration with the explicit Native FIPS flags, without building.
-          "${BAZEL[@]}" cquery "${QUERY_FLAGS[@]}" --output=label 'deps(//private/devices/google/shusky:zuma_shusky_dist)' > "$RUNNER_TEMP/shusky-deps.txt"
+          "${BAZEL[@]}" cquery "${GKI_FLAGS[@]}" "${QUERY_FLAGS[@]}" --output=label 'deps(//private/devices/google/shusky:zuma_shusky_dist)' > "$RUNNER_TEMP/shusky-deps.txt"
           for target in \
             //common:kernel_aarch64_download_or_build \
             //common:kernel_aarch64_images_download_or_build \
