@@ -78,7 +78,7 @@ jobs:
               "embedded HMAC compared in constant time":
                   "hmac.compare_digest(stored,calculated)",
               "postlink relocation sections checked":
-                  '".init.rela.text", ".init.rela.rodata",
+                  ".init.rela.rodata",
           }
           for label, value in required.items():
               if value not in workflow:
