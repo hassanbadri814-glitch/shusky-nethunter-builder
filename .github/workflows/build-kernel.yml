@@ -382,6 +382,33 @@ jobs:
           PY
           echo "=== Confirm Native FIPS kernel label flag exists ==="
           grep -n -A5 -B2 'name = "kernel"' private/devices/google/common/BUILD.bazel
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          workspace = Path("WORKSPACE")
+          resolved = workspace.resolve()
+          text = resolved.read_text()
+          matches = list(re.finditer(r"define_kleaf_workspace\\((.*?)\\)", text, re.S))
+          if len(matches) != 1:
+              raise SystemExit(f"Expected one define_kleaf_workspace call in {resolved}; found {len(matches)}")
+          if "artifact_url_fmt" not in matches[0].group(1):
+              inner = matches[0].group(1).strip()
+              separator = "" if not inner or inner.endswith(",") else ","
+              replacement = (
+                  "define_kleaf_workspace(" + inner + separator
+                  + '\\n    artifact_url_fmt = "https://ci.android.com/builds/submitted/{build_number}/{target}/latest/raw/{filename}",\\n'
+                  + ")"
+              )
+              text = text[:matches[0].start()] + replacement + text[matches[0].end():]
+              resolved.write_text(text)
+          kleaf = Path("build/kernel/kleaf/workspace.bzl").read_text()
+          if "artifact_url_fmt = None" not in kleaf:
+              raise SystemExit("Pinned Kleaf workspace macro does not expose artifact_url_fmt")
+          if "ci.android.com/builds/submitted/{build_number}/{target}/latest/raw/{filename}" not in resolved.read_text():
+              raise SystemExit("Public Android CI artifact endpoint was not installed in WORKSPACE")
+          print(f"PASS: {resolved} uses the documented public ci.android.com artifact endpoint")
+          PY
           echo "GKI prebuilt target routing patch: PASS"
 
       - name: Create native FIPS defconfig fragment
