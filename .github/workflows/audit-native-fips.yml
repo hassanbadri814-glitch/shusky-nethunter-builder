@@ -144,71 +144,7 @@ jobs:
           grep -q '\.init\.rela\.text' audit-report/fips-elf-sections.txt
           grep -q '\.init\.rela\.rodata' audit-report/fips-elf-sections.txt
           file "$DIST"/*.img | tee audit-report/image-file-types.txt
-          python3 - "$DIST/fips140.ko" "artifact/build-report/fips-hmac-execution-verification.txt" <<'PY'
-          import hashlib,hmac,re,struct,sys
-          from pathlib import Path
-          p=Path(sys.argv[1]); blob=p.read_bytes()
-          if len(blob)<64 or blob[:6]!=b'\x7fELF\x02\x01': raise SystemExit('Final fips140.ko is not ELF64 little-endian')
-          hdr=struct.unpack_from('<16sHHIQQQIHHHHHH',blob,0)
-          if hdr[1]!=1 or hdr[2]!=183: raise SystemExit('Final FIPS module is not relocatable AArch64 ELF')
-          shoff,shentsize,shnum,shstrndx=hdr[6],hdr[11],hdr[12],hdr[13]
-          if shentsize<64 or not shnum or shstrndx>=shnum: raise SystemExit('Invalid ELF section table')
-          secs=[]
-          for i in range(shnum):
-              v=struct.unpack_from('<IIQQQQIIQQ',blob,shoff+i*shentsize)
-              secs.append({'nameoff':v[0],'type':v[1],'off':v[4],'size':v[5],'link':v[6],'entsize':v[9]})
-          st=secs[shstrndx]; names=blob[st['off']:st['off']+st['size']]
-          def cstr(tab,off):
-              end=tab.find(b'\0',off)
-              if off<0 or end<0: raise ValueError('Invalid ELF string')
-              return tab[off:end].decode('utf-8','replace')
-          for x in secs: x['name']=cstr(names,x['nameoff'])
-          byname={x['name']:x for x in secs}
-          for n in ['.init.rela.text','.init.rela.rodata']:
-              if n not in byname or not byname[n]['size'] or byname[n]['size']%24: raise SystemExit('Missing/invalid FIPS relocation section '+n)
-          syms={}
-          for sec in secs:
-              if sec['type']!=2: continue
-              strings_sec=secs[sec['link']]
-              strings=blob[strings_sec['off']:strings_sec['off']+strings_sec['size']]
-              ent=sec['entsize'] or 24
-              for i in range(sec['size']//ent):
-                  no,info,other,ndx,val,size=struct.unpack_from('<IBBHQQ',blob,sec['off']+i*ent)
-                  if no and ndx<len(secs): syms.setdefault(cstr(strings,no),set()).add((ndx,val,size))
-          def sym(n):
-              a=syms.get(n,set())
-              if len(a)!=1: raise SystemExit(f'Expected one definition of {n}, found {len(a)}')
-              return next(iter(a))
-          def span(first,last):
-              a,av,_=sym(first); b,bv,_=sym(last)
-              if a!=b or not 0<=av<bv<=secs[a]['size']: raise SystemExit(f'Invalid authenticated range {first}..{last}')
-              sec=secs[a]
-              return blob[sec['off']+av:sec['off']+bv]
-          kn,kv,ks=sym('fips140_integ_hmac_key'); sec=secs[kn]
-          start=sec['off']+kv; end=start+ks if ks else sec['off']+sec['size']
-          rawkey=blob[start:end]
-          if b'\0' not in rawkey or not rawkey.split(b'\0',1)[0]: raise SystemExit('Invalid embedded FIPS HMAC key')
-          key=rawkey.split(b'\0',1)[0]
-          dn,dv,ds=sym('fips140_integ_hmac_digest')
-          if ds<32: raise SystemExit('Embedded FIPS digest field too short')
-          stored=blob[secs[dn]['off']+dv:secs[dn]['off']+dv+32]
-          textdata=span('__fips140_text_start','__fips140_text_end')
-          rodata=span('__fips140_rodata_start','__fips140_rodata_end')
-          actual=hmac.new(key,textdata+rodata,hashlib.sha256).digest()
-          if not hmac.compare_digest(stored,actual): raise SystemExit('Independent final-module HMAC-SHA256 mismatch')
-          report=Path(sys.argv[2]).read_text()
-          expected={
-              'Module SHA-256':hashlib.sha256(blob).hexdigest(),
-              'Embedded HMAC-SHA256':actual.hex(),
-              'HMAC key SHA-256':hashlib.sha256(key).hexdigest(),
-              'Authenticated .text SHA-256':hashlib.sha256(textdata).hexdigest(),
-              'Authenticated .rodata SHA-256':hashlib.sha256(rodata).hexdigest(),
-              'HMAC key length':f'{len(key)} bytes',
-              'Covered .text bytes':str(len(textdata)),
-              'Covered .rodata bytes':str(len(rodata)),
-          }
-          for label,value in expected.items():
-              if not re.search(r'^'+re.escape(label)+r':\\s*'+re.escape(value)+r'          e2fsck -fn "$DIST/vendor_dlkm.img" > audit-report/vendor-dlkm-fsck.txt 2>&1
+          e2fsck -fn "$DIST/vendor_dlkm.img" > audit-report/vendor-dlkm-fsck.txt 2>&1
           e2fsck -fn "$DIST/system_dlkm.img" > audit-report/system-dlkm-fsck.txt 2>&1
           sudo debugfs -R "rdump / $GITHUB_WORKSPACE/vendor-dlkm-root" "$DIST/vendor_dlkm.img" > audit-report/vendor-dlkm-extract.txt 2>&1
           sudo debugfs -R "rdump / $GITHUB_WORKSPACE/system-dlkm-root" "$DIST/system_dlkm.img" > audit-report/system-dlkm-extract.txt 2>&1
@@ -275,6 +211,93 @@ jobs:
             echo "Independent artifact audit: PASS"
             echo "Final images, DLKM filesystems, Native FIPS and vendor ramdisk: PASS"
           } | tee audit-report/AUDIT-PASS.txt
+
+      - name: Independently recompute HMAC from the packaged final FIPS module
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "artifact/build-report/package/out/shusky/dist/fips140.ko" "artifact/build-report/fips-hmac-execution-verification.txt" <<'PY'
+          import hashlib, hmac, re, struct, sys
+          from pathlib import Path
+          path=Path(sys.argv[1]); blob=path.read_bytes()
+          if len(blob)<64 or blob[:6]!=b'\x7fELF\x02\x01':
+              raise SystemExit('Final fips140.ko is not ELF64 little-endian')
+          hdr=struct.unpack_from('<16sHHIQQQIHHHHHH',blob,0)
+          if hdr[1]!=1 or hdr[2]!=183:
+              raise SystemExit('Final FIPS module is not relocatable AArch64 ELF')
+          shoff,shentsize,shnum,shstrndx=hdr[6],hdr[11],hdr[12],hdr[13]
+          if shentsize<64 or not shnum or shstrndx>=shnum:
+              raise SystemExit('Invalid ELF section-header table')
+          secs=[]
+          for i in range(shnum):
+              v=struct.unpack_from('<IIQQQQIIQQ',blob,shoff+i*shentsize)
+              secs.append({'nameoff':v[0],'type':v[1],'off':v[4],'size':v[5],'link':v[6],'entsize':v[9]})
+          st=secs[shstrndx]; names=blob[st['off']:st['off']+st['size']]
+          def cstr(tab,off):
+              end=tab.find(b'\0',off)
+              if off<0 or end<0: raise ValueError('Invalid ELF string')
+              return tab[off:end].decode('utf-8','replace')
+          for sec in secs: sec['name']=cstr(names,sec['nameoff'])
+          byname={sec['name']:sec for sec in secs}
+          for name in ['.init.rela.text','.init.rela.rodata']:
+              if name not in byname or not byname[name]['size'] or byname[name]['size']%24:
+                  raise SystemExit('Missing/invalid FIPS relocation section '+name)
+          symbols={}
+          for sec in secs:
+              if sec['type']!=2: continue
+              if sec['link']>=len(secs): raise SystemExit('Invalid ELF symbol string-table link')
+              ss=secs[sec['link']]; strings=blob[ss['off']:ss['off']+ss['size']]
+              ent=sec['entsize'] or 24
+              if ent<24: raise SystemExit('Invalid ELF symbol entry size')
+              for i in range(sec['size']//ent):
+                  no,info,other,ndx,val,size=struct.unpack_from('<IBBHQQ',blob,sec['off']+i*ent)
+                  if no and ndx<len(secs):
+                      symbols.setdefault(cstr(strings,no),set()).add((ndx,val,size))
+          def sym(name):
+              found=symbols.get(name,set())
+              if len(found)!=1: raise SystemExit('Expected one defined symbol: '+name)
+              return next(iter(found))
+          def span(first,last):
+              a,av,_=sym(first); b,bv,_=sym(last)
+              if a!=b or not 0<=av<bv<=secs[a]['size']:
+                  raise SystemExit('Invalid authenticated symbol range: '+first+'..'+last)
+              sec=secs[a]
+              return blob[sec['off']+av:sec['off']+bv]
+          kn,kv,ks=sym('fips140_integ_hmac_key'); keysec=secs[kn]
+          begin=keysec['off']+kv
+          finish=begin+ks if ks else keysec['off']+keysec['size']
+          keydata=blob[begin:finish]
+          if b'\0' not in keydata or not keydata.split(b'\0',1)[0]:
+              raise SystemExit('Invalid embedded FIPS HMAC key')
+          key=keydata.split(b'\0',1)[0]
+          dn,dv,ds=sym('fips140_integ_hmac_digest')
+          if ds<32: raise SystemExit('Embedded HMAC digest field is too small')
+          stored=blob[secs[dn]['off']+dv:secs[dn]['off']+dv+32]
+          textdata=span('__fips140_text_start','__fips140_text_end')
+          rodata=span('__fips140_rodata_start','__fips140_rodata_end')
+          digest=hmac.new(key,textdata+rodata,hashlib.sha256).digest()
+          if not hmac.compare_digest(stored,digest):
+              raise SystemExit('Independent HMAC-SHA256 recomputation failed')
+          actual={
+              'Module SHA-256':hashlib.sha256(blob).hexdigest(),
+              'Embedded HMAC-SHA256':digest.hex(),
+              'HMAC key SHA-256':hashlib.sha256(key).hexdigest(),
+              'Authenticated .text SHA-256':hashlib.sha256(textdata).hexdigest(),
+              'Authenticated .rodata SHA-256':hashlib.sha256(rodata).hexdigest(),
+              'HMAC key length':str(len(key))+' bytes',
+              'Covered .text bytes':str(len(textdata)),
+              'Covered .rodata bytes':str(len(rodata)),
+          }
+          report=Path(sys.argv[2]).read_text().splitlines()
+          for label,value in actual.items():
+              if label+': '+value not in report:
+                  raise SystemExit('Independent result disagrees with build report: '+label)
+          output=['Independent final artifact HMAC-SHA256 recomputation: PASS']
+          output += [label+': '+value for label,value in actual.items()]
+          Path('audit-report/fips-hmac-independent.txt').write_text('\n'.join(output)+'\n')
+          print('\n'.join(output))
+          PY
 
       - name: Upload independent audit evidence
         if: always()
