@@ -751,8 +751,26 @@ jobs:
               'fips140_gen_hmac|cmd_gen_hmac|gen_hmac' \
               2>/dev/null \
             | tee "$REPORT_DIR/fips-hmac-command-evidence.txt" || true
-          echo "HMAC evidence collected."
-          echo "Evidence must be reviewed; this step alone does not prove execution."
+          MODULE="$(find . -type f -path '*/crypto/fips140.ko' -not -path './build-report/*' -print -quit)"
+          if [ -z "$MODULE" ]; then
+            echo "ERROR: cannot verify HMAC execution because crypto/fips140.ko is missing."
+            exit 1
+          fi
+          if ! grep -Eiq 'fips140_gen_hmac|cmd_gen_hmac|gen_hmac' "$REPORT_DIR/fips-hmac-build-log.txt" "$REPORT_DIR/fips-hmac-command-evidence.txt"; then
+            echo "ERROR: no generated build-log or command-file evidence proves that the Native FIPS HMAC generator was invoked."
+            exit 1
+          fi
+          if ! grep -Eiq 'fips140\.ko' "$REPORT_DIR/fips-hmac-command-evidence.txt" "$REPORT_DIR/fips-hmac-build-log.txt"; then
+            echo "ERROR: HMAC invocation evidence does not identify the fips140.ko target."
+            exit 1
+          fi
+          {
+            echo "HMAC execution evidence: PASS"
+            echo "Module: $MODULE"
+            sha256sum "$MODULE"
+            echo "Evidence files:"
+            ls -l "$REPORT_DIR/fips-hmac-build-log.txt" "$REPORT_DIR/fips-hmac-command-evidence.txt"
+          } | tee "$REPORT_DIR/fips-hmac-execution-verification.txt"
 
       - name: Verify generated vendor ramdisk modules.load
         if: success()
