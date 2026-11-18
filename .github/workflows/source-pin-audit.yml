@@ -444,10 +444,17 @@ jobs:
           if not matches:
               raise SystemExit("FAIL: no Kleaf download implementation markers found")
 
-          print("\n=== Diagnostic boundary ===")
-          print("No Bazel query, build, compilation, image generation or flash was run.")
-          with open(os.environ["GITHUB_ENV"], "a") as env:
-              env.write("SKIP_BAZEL_QUERY=1\n")
+          print("\n=== Controlled, temporary Kleaf URL test ===")
+          download_repo = kleaf_root / "kleaf/download_repo.bzl"
+          download_text = download_repo.read_text()
+          old_url = "https://androidbuildinternal.googleapis.com/android/internal/build/v3/builds/{build_number}/{target}/attempts/latest/artifacts/{filename}/url?redirect=true"
+          public_url = "https://ci.android.com/builds/submitted/{build_number}/{target}/latest/raw/{filename}"
+          if download_text.count(old_url) != 1:
+              raise SystemExit("FAIL: expected exactly one pinned internal artifact URL constant")
+          download_repo.write_text(download_text.replace(old_url, public_url, 1))
+          print("PASS: patched exactly one URL constant in the disposable runner checkout.")
+          print("The repository's committed kernel sources and production workflow remain unchanged.")
+          print("The next step is a read-only Bazel cquery; no build or image target is invoked.")
           PY
 
       - name: Probe public Android CI artifacts for the exact installed GKI build (read only)
@@ -469,7 +476,6 @@ jobs:
           done
 
       - name: Run read-only Bazel target and dependency queries (no build)
-        if: env.SKIP_BAZEL_QUERY != '1'
         shell: bash
         run: |
           set -euo pipefail
