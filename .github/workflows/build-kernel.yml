@@ -536,6 +536,7 @@ jobs:
           ./private/devices/google/shusky/build_shusky.sh \
             --kernel_package=@//aosp \
             --use_prebuilt_gki=14691759 \
+            --action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759 \
             --//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
             --verbose_failures \
