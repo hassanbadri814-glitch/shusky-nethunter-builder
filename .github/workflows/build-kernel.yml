@@ -507,11 +507,15 @@ jobs:
           fips_entry = "kernel/crypto/fips140.ko"
           zuma_lines = zuma_ramdisk.read_text().splitlines()
           if fips_entry not in zuma_lines:
-              # Preserve Google's existing module ordering.
-              # Do not assume FIPS must be the first module.
-              zuma_lines.append(fips_entry)
+              # Google's Native FIPS crypto module is intended for early boot.
+              # Put it first, before the UFS FIPS consumer and other device modules.
+              zuma_lines.insert(0, fips_entry)
               zuma_ramdisk.write_text(
                   "\n".join(zuma_lines) + "\n"
+              )
+          if zuma_lines[0] != fips_entry:
+              raise SystemExit(
+                  "ERROR: kernel/crypto/fips140.ko must be first in the Zuma ramdisk load list"
               )
           shusky_lines = shusky_ramdisk.read_text().splitlines()
           if fips_entry in shusky_lines:
