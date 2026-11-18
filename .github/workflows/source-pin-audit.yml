@@ -525,7 +525,7 @@ jobs:
                   if path.is_file() and (path.name.startswith("BUILD") or path.suffix in (".bzl", ".mk", ".config")):
                       print(path)
 
-                    print("\n=== Git revisions for the exact failing source directories ===")
+          print("\n=== Git revisions for the exact failing source directories ===")
           for directory in (
               "private/google-modules/wlan",
               "private/google-modules/soc",
