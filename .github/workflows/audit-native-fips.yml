@@ -105,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y cpio lz4 e2fsprogs file curl zstd binutils
+          sudo apt-get install -y cpio lz4 e2fsprogs file curl zstd binutils kmod
 
       - name: Audit final images, DLKM filesystems, and Native FIPS ramdisk
         env:
@@ -218,6 +218,104 @@ jobs:
           print('Vendor ramdisk fragments:',len(roots),'modules.load:',len(loads),'entries:',len(entries),'module files:',len(ko))
           print('FIPS load order, module presence/hash, all module paths, exclusions: PASS')
           PY
+      - name: Independently verify module releases and FIPS KMI CRCs
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED="6.1.145-android14-11-gfa1d6308d1fe"
+          mapfile -t MODULES < <(
+            find ramdisk-extracted vendor-dlkm-root system-dlkm-root \
+              -type f -name '*.ko' -print | sort -u
+          )
+          if [ "${#MODULES[@]}" -lt 200 ]; then
+            echo "Expected the complete generated module set; found ${#MODULES[@]}."
+            exit 1
+          fi
+          BAD=0
+          for module in "${MODULES[@]}"; do
+            release="$(modinfo -F vermagic "$module" | awk '{print $1}')"
+            release="${release%-ab*}"
+            if [ "$release" != "$EXPECTED" ]; then
+              echo "RELEASE_MISMATCH $module :: $release"
+              BAD=1
+            fi
+          done
+          if [ "$BAD" -ne 0 ]; then
+            echo "Generated module set does not match the exact Pixel 8 GKI release."
+            exit 1
+          fi
+
+          FIPS_MODULE="artifact/build-report/package/out/shusky/dist/fips140.ko"
+          GKI_MODULE="$(find ramdisk-extracted -type f -name zsmalloc.ko -print -quit)"
+          test -s "$FIPS_MODULE"
+          test -n "$GKI_MODULE"
+          FIPS_LAYOUT_CRC="$(modprobe --show-modversions "$FIPS_MODULE" | awk '$2 == "module_layout" {print $1}')"
+          GKI_LAYOUT_CRC="$(modprobe --show-modversions "$GKI_MODULE" | awk '$2 == "module_layout" {print $1}')"
+          test -n "$FIPS_LAYOUT_CRC"
+          test "$FIPS_LAYOUT_CRC" = "$GKI_LAYOUT_CRC"
+
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://ci.android.com/builds/submitted/14691759/kernel_aarch64/latest/raw/vmlinux.symvers" \
+            -o audit-report/gki-vmlinux.symvers
+          test -s audit-report/gki-vmlinux.symvers
+
+          python3 - "$FIPS_MODULE" audit-report/gki-vmlinux.symvers audit-report/fips-gki-crc-independent.txt <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          module, symvers_path, report_path = sys.argv[1:]
+          def norm(value):
+              value = value.lower()
+              return value[2:] if value.startswith("0x") else value
+
+          kernel_symbols = {}
+          with open(symvers_path, encoding="utf-8", errors="replace") as handle:
+              for line in handle:
+                  fields = line.split()
+                  if len(fields) >= 2 and re.fullmatch(r"(?:0x)?[0-9a-fA-F]{8}", fields[0]):
+                      kernel_symbols[fields[1]] = norm(fields[0])
+
+          output = subprocess.check_output(["modprobe", "--show-modversions", module], text=True)
+          imports = []
+          for line in output.splitlines():
+              fields = line.split()
+              if len(fields) >= 2 and fields[0].startswith("0x"):
+                  imports.append((fields[1], norm(fields[0])))
+
+          missing = []
+          mismatches = []
+          for symbol, expected_crc in imports:
+              actual_crc = kernel_symbols.get(symbol)
+              if actual_crc is None:
+                  missing.append(symbol)
+              elif actual_crc != expected_crc:
+                  mismatches.append((symbol, expected_crc, actual_crc))
+
+          with open(report_path, "w", encoding="utf-8") as report:
+              report.write(f"FIPS module: {module}\n")
+              report.write(f"GKI vmlinux.symvers symbols: {len(kernel_symbols)}\n")
+              report.write(f"FIPS imported symbols checked: {len(imports)}\n")
+              report.write(f"Missing GKI symbols: {len(missing)}\n")
+              report.write(f"CRC mismatches: {len(mismatches)}\n")
+              for symbol in missing:
+                  report.write(f"MISSING {symbol}\n")
+              for symbol, expected, actual in mismatches:
+                  report.write(f"CRC_MISMATCH {symbol} module={expected} GKI={actual}\n")
+
+          if not imports or missing or mismatches:
+              sys.exit(1)
+          PY
+
+          {
+            echo "Expected kernel release: $EXPECTED"
+            echo "Generated modules independently inspected: ${#MODULES[@]}"
+            echo "All module vermagic release prefixes match."
+            echo "FIPS module_layout CRC matches the GKI zsmalloc module."
+            echo "FIPS imported-symbol CRCs match GKI build 14691759 vmlinux.symvers."
+          } | tee audit-report/module-kmi-independent.txt
+
       - name: Independently recompute HMAC from the packaged final FIPS module
         if: success()
         shell: bash
