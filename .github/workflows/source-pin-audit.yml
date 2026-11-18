@@ -544,8 +544,24 @@ jobs:
                   print(f"{directory}: {top} @ {sha}")
               else:
                   print(f"{directory}: no Git project root found")
-          with open(os.environ["GITHUB_ENV"], "a") as env:
-              env.write("SKIP_BAZEL_QUERY=1\n")
+          print("\n=== Verify the official Shusky Bazel config entry points ===")
+          for relative in (
+              ".bazelrc",
+              ".d4.bazelrc",
+              ".d5.bazelrc",
+              ".d6.bazelrc",
+              "private/devices/google/shusky/device.bazelrc",
+              "private/devices/google/shusky/build_shusky.sh",
+              "build/kernel/kleaf/common.bazelrc",
+          ):
+              path = root / relative
+              print(f"\n--- {relative} ---")
+              if path.is_symlink():
+                  print("SYMLINK ->", os.readlink(path))
+              if path.is_file():
+                  print(path.read_text(errors="replace"))
+              else:
+                  print("NOT PRESENT")
           PY
 
       - name: Probe public Android CI artifacts for the exact installed GKI build (read only)
@@ -567,7 +583,6 @@ jobs:
           done
 
       - name: Run read-only Bazel target and dependency queries (no build)
-        if: env.SKIP_BAZEL_QUERY != '1'
         shell: bash
         run: |
           set -euo pipefail
@@ -578,7 +593,7 @@ jobs:
           # Match the production build invocation exactly. Without this flag,
           # Kleaf falls back to its default GKI build-number map (13202960).
           GKI_FLAGS=(--use_prebuilt_gki=14691759 --action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759)
-          QUERY_FLAGS=(--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build --no//private/devices/google/common:download_prebuilt_gki_fips140)
+          QUERY_FLAGS=(--config=shusky --//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build --no//private/devices/google/common:download_prebuilt_gki_fips140)
           echo "=== Native FIPS ABI target ==="
           "${BAZEL[@]}" query "$ABI_LABEL" --output=label
           echo "=== Shusky distribution target with Native FIPS ABI edits ==="
