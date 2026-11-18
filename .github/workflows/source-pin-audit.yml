@@ -450,6 +450,24 @@ jobs:
               env.write("SKIP_BAZEL_QUERY=1\n")
           PY
 
+      - name: Probe public Android CI artifacts for the exact installed GKI build (read only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Testing the documented public CI endpoint with byte-range requests only."
+          for artifact in \
+            kernel-headers.tar.gz \
+            system_dlkm_staging_archive.tar.gz \
+            system_dlkm.modules.blocklist \
+            system_dlkm.modules.load
+          do
+            url="https://ci.android.com/builds/submitted/14691759/kernel_aarch64/latest/raw/$artifact"
+            status="$(curl --silent --show-error --location --range 0-0 \
+              --max-time 45 --output /dev/null --write-out '%{http_code}' \
+              "$url" || true)"
+            printf '%-42s HTTP %s\n' "$artifact" "$status"
+          done
+
       - name: Run read-only Bazel target and dependency queries (no build)
         if: env.SKIP_BAZEL_QUERY != '1'
         shell: bash
