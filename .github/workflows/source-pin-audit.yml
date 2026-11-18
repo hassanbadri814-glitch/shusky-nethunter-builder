@@ -65,6 +65,20 @@ jobs:
                   "//common:kernel_aarch64_headers_download_or_build",
               "build authorization guard":
                   "contains(github.event.head_commit.message, 'build-authorized')",
+              "HMAC postlink target is module-specific":
+                  "quiet_cmd_gen_hmac = HMAC",
+              "HMAC postlink target rule":
+                  "$(objtree)/crypto/fips140.ko: FORCE",
+              "HMAC tool receives fips140.ko as its argument":
+                  "$(CMD_FIPS140_GEN_HMAC) $@",
+              "HMAC evidence matches the exact Kbuild target":
+                  "crypto/fips140\\.ko",
+              "independent HMAC-SHA256 recomputation":
+                  "hmac.new(key,textdata+rodata,hashlib.sha256)",
+              "embedded HMAC compared in constant time":
+                  "hmac.compare_digest(stored,calculated)",
+              "postlink relocation sections checked":
+                  '".init.rela.text", ".init.rela.rodata",
           }
           for label, value in required.items():
               if value not in workflow:
