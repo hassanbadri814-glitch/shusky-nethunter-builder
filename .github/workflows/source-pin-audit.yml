@@ -482,6 +482,34 @@ jobs:
                                   print(f"{j + 1}: {lines[j]}")
                                   emitted.add(j)
 
+          print("Exact Zuma/Shusky ramdisk-list BUILD wiring:")
+          for relative in (
+              "private/devices/google/zuma/BUILD.bazel",
+              "private/devices/google/shusky/BUILD.bazel",
+              "build/kernel/kleaf/impl/image/kernel_images.bzl",
+              "build/kernel/kleaf/impl/image/initramfs.bzl",
+              "build/kernel/kleaf/artifact_tests/initramfs_modules_lists_test.py",
+          ):
+              path = Path(relative)
+              if not path.is_file():
+                  continue
+              lines = path.read_text(errors="replace").splitlines()
+              hits = [
+                  i for i, line in enumerate(lines)
+                  if any(token in line for token in (
+                      "vendor_ramdisk.modules", "modules_list", "vendor_boot.modules.load",
+                      "modules.dep does not contain", "def _verify_modules_dep",
+                  ))
+              ]
+              if hits:
+                  print(f"--- {relative} ---")
+                  emitted = set()
+                  for i in hits:
+                      for j in range(max(0, i - 5), min(len(lines), i + 8)):
+                          if j not in emitted:
+                              print(f"{j + 1}: {lines[j]}")
+                              emitted.add(j)
+
           print("Vendor ramdisk module-list consumers:")
           scan_roots = (
               Path("private/devices/google"),
