@@ -1,0 +1,216 @@
+name: Independent Shiba Native FIPS Artifact Audit
+on:
+  workflow_run:
+    workflows:
+      - Build Pixel 8 Shiba - NetHunter Native FIPS Test
+    types: [completed]
+  push:
+    branches: [main]
+    paths: [.github/workflows/audit-native-fips.yml]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: shiba-native-fips-independent-audit
+  cancel-in-progress: false
+jobs:
+  audit:
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'push' && contains(github.event.head_commit.message, 'audit-target-'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Select and verify source build
+        id: source
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: \${{ github.event_name }}
+          EVENT_RUN_ID: \${{ github.event.workflow_run.id }}
+          COMMIT_MESSAGE: \${{ github.event.head_commit.message }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == workflow_run ]]; then RUN_ID="$EVENT_RUN_ID"; else
+            RUN_ID="$(python3 - "$COMMIT_MESSAGE" <<'PY'
+          import re,sys
+          m=re.search(r'\baudit-target-(\d+)\b',sys.argv[1])
+          if not m: raise SystemExit('Explicit audit-target-RUN_ID marker missing')
+          print(m.group(1))
+          PY
+          )"
+          fi
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$API" -o run.json
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$API/jobs?per_page=100" -o jobs.json
+          python3 - "$RUN_ID" <<'PY'
+          import json,sys
+          r=json.load(open('run.json'))
+          if str(r.get('id'))!=sys.argv[1] or r.get('name')!='Build Pixel 8 Shiba - NetHunter Native FIPS Test':
+              raise SystemExit('Wrong source workflow/run')
+          if r.get('status')!='completed' or r.get('conclusion')!='success' or r.get('head_branch')!='main':
+              raise SystemExit('Source workflow is not a successful main-branch run')
+          jobs=json.load(open('jobs.json')).get('jobs',[])
+          b=[j for j in jobs if j.get('name')=='Build and verify Shiba Native FIPS kernel']
+          if len(b)!=1 or b[0].get('conclusion')!='success':
+              raise SystemExit('Actual Native FIPS build job did not succeed')
+          with open('source.env','w') as f: f.write(f"SOURCE_RUN_ID={r['id']}\nSOURCE_SHA={r['head_sha']}\n")
+          print('Verified source run',r['id'],'commit',r['head_sha'])
+          PY
+          cat source.env >> "$GITHUB_OUTPUT"
+
+      - name: Download exact artifact and verify GitHub SHA-256
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN_ID: \${{ steps.source.outputs.SOURCE_RUN_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" -o artifacts.json
+          python3 - <<'PY'
+          import json
+          a=[x for x in json.load(open('artifacts.json')).get('artifacts',[]) if x.get('name')=='shiba-nethunter-native-fips-build-test']
+          if len(a)!=1 or a[0].get('expired') or not a[0].get('digest','').startswith('sha256:'):
+              raise SystemExit('Expected one unexpired build artifact with SHA-256 digest')
+          with open('artifact.env','w') as f:
+              f.write(f"ARTIFACT_ID={a[0]['id']}\nARTIFACT_SHA={a[0]['digest'].split(':',1)[1]}\n")
+          print('Artifact size:',a[0]['size_in_bytes'],'digest:',a[0]['digest'])
+          PY
+          source artifact.env
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" -o artifact.zip
+          ACTUAL="$(sha256sum artifact.zip | awk '{print $1}')"
+          test "$ACTUAL" = "$ARTIFACT_SHA"
+          mkdir artifact
+          unzip -q artifact.zip -d artifact
+          echo "GitHub artifact SHA-256 verified: $ACTUAL"
+
+      - name: Install independent inspection tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cpio lz4 e2fsprogs file curl zstd binutils
+
+      - name: Audit final images, DLKM filesystems, and Native FIPS ramdisk
+        env:
+          SOURCE_RUN_ID: \${{ steps.source.outputs.SOURCE_RUN_ID }}
+          SOURCE_SHA: \${{ steps.source.outputs.SOURCE_SHA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p audit-report unpacked ramdisk-extracted vendor-dlkm-root system-dlkm-root
+          DIST="artifact/build-report/package/out/shusky/dist"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re
+          root=Path('artifact/build-report'); d=root/'package/out/shusky/dist'
+          required=['Image','Image.lz4','boot.img','dtbo.img','system_dlkm.img','vendor_dlkm.img','vendor_kernel_boot.img','fips140.ko','modules.load']
+          for n in required:
+              p=d/n
+              if not p.is_file() or p.stat().st_size==0: raise SystemExit('Missing/empty final output: '+n)
+          cfg=(root/'fips-config.txt').read_text()
+          for x in ['CONFIG_CRYPTO_FIPS140_MOD=m','CONFIG_MODULES=y','CONFIG_MODVERSIONS=y','CONFIG_CFG80211=m','CONFIG_MAC80211=m','CONFIG_USB=y']:
+              if x not in cfg: raise SystemExit('Required config missing: '+x)
+          if re.search(r'^CONFIG_KSU=(y|m)$',cfg,re.M): raise SystemExit('KernelSU enabled unexpectedly')
+          h=(root/'fips-hmac-execution-verification.txt').read_text()
+          for x in ['Kbuild target binding: PASS','Independent embedded HMAC-SHA256 recomputation: PASS','Verified module candidates: 3']:
+              if x not in h: raise SystemExit('FIPS HMAC evidence missing: '+x)
+          dig=re.findall(r'^Module SHA-256: ([0-9a-f]{64})$',h,re.M)
+          sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+          if len(dig)!=1 or sha(d/'fips140.ko')!=dig[0]: raise SystemExit('Final FIPS module digest mismatch')
+          ml=(d/'modules.load').read_text().splitlines()
+          if not ml or len(ml)!=len(set(ml)) or ml.count('kernel/crypto/fips140.ko')!=1:
+              raise SystemExit('Final dist modules.load invalid or FIPS entry absent/duplicated')
+          if any(re.search(r'(rtl8187|mt76|ksu)\S*\.ko$',x,re.I) for x in ml):
+              raise SystemExit('Excluded module found in final modules.load')
+          for n in required: print(n,(d/n).stat().st_size,'bytes',sha(d/n))
+          print('Final dist, kernel config, FIPS HMAC evidence: PASS')
+          PY
+          test "$(dd if="$DIST/vendor_kernel_boot.img" bs=8 count=1 2>/dev/null)" = "VNDRBOOT"
+          test "$(dd if="$DIST/boot.img" bs=8 count=1 2>/dev/null)" = "ANDROID!"
+          python3 - "$DIST/dtbo.img" <<'PY'
+          import sys
+          with open(sys.argv[1],'rb') as f: m=int.from_bytes(f.read(4),'big')
+          if m!=0xd7b7ab1e: raise SystemExit(f'Bad DTBO magic: {m:#x}')
+          PY
+          lz4 -t "$DIST/Image.lz4"
+          test "$(sha256sum "$DIST/Image" | awk '{print $1}')" = "$(lz4 -dc "$DIST/Image.lz4" | sha256sum | awk '{print $1}')"
+          readelf -h "$DIST/fips140.ko" > audit-report/fips-elf-header.txt
+          readelf -S "$DIST/fips140.ko" > audit-report/fips-elf-sections.txt
+          grep -q AArch64 audit-report/fips-elf-header.txt
+          grep -q '\.init\.rela\.text' audit-report/fips-elf-sections.txt
+          grep -q '\.init\.rela\.rodata' audit-report/fips-elf-sections.txt
+          file "$DIST"/*.img | tee audit-report/image-file-types.txt
+          e2fsck -fn "$DIST/vendor_dlkm.img" > audit-report/vendor-dlkm-fsck.txt 2>&1
+          e2fsck -fn "$DIST/system_dlkm.img" > audit-report/system-dlkm-fsck.txt 2>&1
+          debugfs -R "rdump / $GITHUB_WORKSPACE/vendor-dlkm-root" "$DIST/vendor_dlkm.img" > audit-report/vendor-dlkm-extract.txt 2>&1
+          debugfs -R "rdump / $GITHUB_WORKSPACE/system-dlkm-root" "$DIST/system_dlkm.img" > audit-report/system-dlkm-extract.txt 2>&1
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          mods=[p for r in [Path('vendor-dlkm-root'),Path('system-dlkm-root')] for p in r.rglob('*.ko')]
+          names={p.name for p in mods}
+          for x in ['cfg80211.ko','mac80211.ko']:
+              if x not in names: raise SystemExit('Required DLKM module missing: '+x)
+          bad=[p for p in mods if re.search(r'(rtl8187|mt76|ksu)\S*\.ko$',p.name,re.I)]
+          if bad: raise SystemExit('Excluded DLKM module found: '+str(bad[:10]))
+          print('DLKM modules:',len(mods),'required wireless present; RTL8187/MT76/KernelSU absent: PASS')
+          PY
+          curl -fsSL 'https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/unpack_bootimg.py?format=TEXT' | base64 -d > unpack_bootimg.py
+          python3 unpack_bootimg.py --boot_img "$DIST/vendor_kernel_boot.img" --out unpacked 2>&1 | tee audit-report/unpack-vendor-boot.txt
+          find unpacked -maxdepth 1 -type f -name 'vendor_ramdisk*' -print | sort > audit-report/vendor-ramdisk-parts.txt
+          grep -q . audit-report/vendor-ramdisk-parts.txt
+          i=0
+          while IFS= read -r part; do
+            i=$((i+1)); dest="ramdisk-extracted/part-$i"; mkdir -p "$dest"
+            if lz4 -t "$part" >/dev/null 2>&1; then lz4 -dc "$part" | (cd "$dest" && cpio -idm --quiet)
+            elif gzip -t "$part" >/dev/null 2>&1; then gzip -dc "$part" | (cd "$dest" && cpio -idm --quiet)
+            elif zstd -t "$part" >/dev/null 2>&1; then zstd -dc "$part" | (cd "$dest" && cpio -idm --quiet)
+            else (cd "$dest" && cpio -idm --quiet < "$GITHUB_WORKSPACE/$part"); fi
+          done < audit-report/vendor-ramdisk-parts.txt
+          find ramdisk-extracted -type f \( -name modules.load -o -name fips140.ko -o -name ufs-pixel-fips140.ko \) -printf '%p %s bytes\n' | sort > audit-report/ramdisk-critical-files.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re
+          roots=list(Path('ramdisk-extracted').glob('part-*'))
+          loads=[p for r in roots for p in r.rglob('modules.load')]
+          ko=[p for r in roots for p in r.rglob('*.ko')]
+          if not loads or not any(p.name=='fips140.ko' for p in ko) or not any(p.name=='ufs-pixel-fips140.ko' for p in ko):
+              raise SystemExit('FIPS or UFS FIPS module/modules.load missing from actual vendor ramdisk')
+          h=hashlib.sha256(Path('artifact/build-report/package/out/shusky/dist/fips140.ko').read_bytes()).hexdigest()
+          if not any(hashlib.sha256(p.read_bytes()).hexdigest()==h for p in ko if p.name=='fips140.ko'):
+              raise SystemExit('Ramdisk fips140.ko differs from final dist module')
+          order=False; missing=[]; entries=[]
+          for load in loads:
+              es=[x.strip() for x in load.read_text(errors='replace').splitlines() if x.strip() and not x.lstrip().startswith('#')]
+              entries.extend(es)
+              f=[i for i,x in enumerate(es) if x.endswith('/fips140.ko')]
+              u=[i for i,x in enumerate(es) if x.endswith('/ufs-pixel-fips140.ko')]
+              if f and u and f[0]<u[0]: order=True
+              for e in es:
+                  found=[p for p in ko if p.as_posix().endswith('/'+e) or p.as_posix().endswith(e)]
+                  if len(found)!=1: missing.append((str(load),e,len(found)))
+          if not order: raise SystemExit('FIPS module does not precede UFS FIPS module in the same modules.load')
+          if missing: raise SystemExit(f'Module-load paths not uniquely resolved: {missing[:5]}')
+          bad=[p for p in ko if re.search(r'(rtl8187|mt76|ksu)\S*\.ko$',p.name,re.I)]
+          if bad: raise SystemExit('Excluded module found in vendor ramdisk: '+str(bad[:10]))
+          print('Vendor ramdisk fragments:',len(roots),'modules.load:',len(loads),'entries:',len(entries),'module files:',len(ko))
+          print('FIPS load order, module presence/hash, all module paths, exclusions: PASS')
+          PY
+          {
+            echo "Source run: $SOURCE_RUN_ID"
+            echo "Source commit: $SOURCE_SHA"
+            echo "Independent artifact audit: PASS"
+            echo "Final images, DLKM filesystems, Native FIPS and vendor ramdisk: PASS"
+          } | tee audit-report/AUDIT-PASS.txt
+
+      - name: Upload independent audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-independent-audit-\${{ steps.source.outputs.SOURCE_RUN_ID }}
+          path: audit-report/
+          if-no-files-found: warn
+          retention-days: 30
