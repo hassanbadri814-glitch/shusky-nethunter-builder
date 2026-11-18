@@ -394,7 +394,7 @@ jobs:
           test -x tools/bazel
           ABI_LABEL="$(cat fips-abi-label.txt)"
           BAZEL=(tools/bazel --output_user_root="$RUNNER_TEMP/bazel-query-root")
-          QUERY_FLAGS=(--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build)
+          QUERY_FLAGS=(--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build --no//private/devices/google/common:download_prebuilt_gki_fips140)
           echo "=== Native FIPS ABI target ==="
           "${BAZEL[@]}" query "$ABI_LABEL" --output=label
           echo "=== Shusky distribution target with Native FIPS ABI edits ==="
