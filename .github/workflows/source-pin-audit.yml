@@ -1,4 +1,5 @@
 name: Audit Pixel 8 installed kernel source pin
+# audit-only: extend exact GKI and Native FIPS dependency inspection
 
 on:
   push:
