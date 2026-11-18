@@ -614,9 +614,11 @@ jobs:
           # Match the production build invocation exactly. Without this flag,
           # Kleaf falls back to its default GKI build-number map (13202960).
           GKI_FLAGS=(--use_prebuilt_gki=14691759 --action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759)
-          QUERY_FLAGS=(--config=stamp --config=shusky --kernel_package=@//aosp --//private/devices/google/common:kernel=//private/devices/google/shusky:kernel --//private/google-modules/soc/gs:gs_soc_module=//private/devices/google/shusky:zuma_soc.shusky --no//private/devices/google/common:download_prebuilt_gki_fips140)
+          QUERY_FLAGS=(--//private/devices/google/common:kernel=//private/devices/google/shusky:kernel --//private/google-modules/soc/gs:gs_soc_module=//private/devices/google/shusky:zuma_soc.shusky --no//private/devices/google/common:download_prebuilt_gki_fips140)
           echo "=== Native FIPS ABI target ==="
           "${BAZEL[@]}" query "$ABI_LABEL" --output=label
+          echo "=== Exact kernel_package build-setting default ==="
+          "${BAZEL[@]}" query //common:kernel_package --output=build
           echo "=== Shusky distribution target with Native FIPS ABI edits ==="
           "${BAZEL[@]}" query //private/devices/google/shusky:zuma_shusky_dist --output=label "${QUERY_FLAGS[@]}"
           echo "=== Prebuilt-aware GKI targets ==="
