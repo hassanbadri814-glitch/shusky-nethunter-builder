@@ -1338,6 +1338,124 @@ jobs:
             build-report \
             2>/dev/null || true
 
+      - name: Audit flash image sizes against Pixel 8 stock partition capacities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          python3 <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          dist = Path("out/shusky/dist")
+          capacities = {
+              "boot.img": 67108864,
+              "vendor_kernel_boot.img": 67108864,
+              "dtbo.img": 16777216,
+              "system_dlkm.img": 11714560,
+              "vendor_dlkm.img": 25559040,
+          }
+          report = []
+          report.append("Pixel 8 Shiba partition-fit audit")
+          report.append("Capacities are from the user's saved stock partition measurements.")
+          report.append("")
+          failed = False
+          for name, capacity in capacities.items():
+              path = dist / name
+              if not path.is_file():
+                  report.append(f"MISSING: {name}")
+                  failed = True
+                  continue
+              size = path.stat().st_size
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              status = "PASS" if size <= capacity else "OVERSIZE - DO NOT FLASH"
+              if size > capacity:
+                  failed = True
+              report.append(
+                  f"{name}: size={size} capacity={capacity} "
+                  f"remaining={capacity-size} status={status} sha256={digest}"
+              )
+          for name in ("Image", "fips140.ko", "modules.load", "modules.dep"):
+              path = dist / name
+              if path.is_file():
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  report.append(f"{name}: size={path.stat().st_size} sha256={digest}")
+              else:
+                  report.append(f"{name}: not present in dist (may be packaged elsewhere)")
+          output = "\n".join(report) + "\n"
+          print(output, end="")
+          Path("build-report/image-size-audit.txt").write_text(output)
+          PY
+
+      - name: Upload boot.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-boot-image
+          path: workspace/out/shusky/dist/boot.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload vendor_kernel_boot.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-vendor-kernel-boot-image
+          path: workspace/out/shusky/dist/vendor_kernel_boot.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload dtbo.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-dtbo-image
+          path: workspace/out/shusky/dist/dtbo.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload system_dlkm.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-system-dlkm-image
+          path: workspace/out/shusky/dist/system_dlkm.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload vendor_dlkm.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-vendor-dlkm-image
+          path: workspace/out/shusky/dist/vendor_dlkm.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload FIPS module and ramdisk dependency metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-module-and-ramdisk-metadata
+          path: |
+            workspace/out/shusky/dist/fips140.ko
+            workspace/out/shusky/dist/modules.load
+            workspace/out/shusky/dist/modules.dep
+            workspace/out/shusky/dist/modules.softdep
+            workspace/build-report/image-size-audit.txt
+            workspace/build-report/fips-hmac-execution-verification.txt
+            workspace/build-report/fips-gki-crc-audit.txt
+            workspace/build-report/final-dist-modules.load
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14
+
       - name: Upload Native FIPS build artifacts
         if: always()
         uses: actions/upload-artifact@v4
