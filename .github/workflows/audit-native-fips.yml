@@ -144,10 +144,161 @@ jobs:
           grep -q '\.init\.rela\.text' audit-report/fips-elf-sections.txt
           grep -q '\.init\.rela\.rodata' audit-report/fips-elf-sections.txt
           file "$DIST"/*.img | tee audit-report/image-file-types.txt
+          python3 - "$DIST/fips140.ko" "artifact/build-report/fips-hmac-execution-verification.txt" <<'PY'
+          import hashlib,hmac,re,struct,sys
+          from pathlib import Path
+          p=Path(sys.argv[1]); blob=p.read_bytes()
+          if len(blob)<64 or blob[:6]!=b'\x7fELF\x02\x01': raise SystemExit('Final fips140.ko is not ELF64 little-endian')
+          hdr=struct.unpack_from('<16sHHIQQQIHHHHHH',blob,0)
+          if hdr[1]!=1 or hdr[2]!=183: raise SystemExit('Final FIPS module is not relocatable AArch64 ELF')
+          shoff,shentsize,shnum,shstrndx=hdr[6],hdr[11],hdr[12],hdr[13]
+          if shentsize<64 or not shnum or shstrndx>=shnum: raise SystemExit('Invalid ELF section table')
+          secs=[]
+          for i in range(shnum):
+              v=struct.unpack_from('<IIQQQQIIQQ',blob,shoff+i*shentsize)
+              secs.append({'nameoff':v[0],'type':v[1],'off':v[4],'size':v[5],'link':v[6],'entsize':v[9]})
+          st=secs[shstrndx]; names=blob[st['off']:st['off']+st['size']]
+          def cstr(tab,off):
+              end=tab.find(b'\0',off)
+              if off<0 or end<0: raise ValueError('Invalid ELF string')
+              return tab[off:end].decode('utf-8','replace')
+          for x in secs: x['name']=cstr(names,x['nameoff'])
+          byname={x['name']:x for x in secs}
+          for n in ['.init.rela.text','.init.rela.rodata']:
+              if n not in byname or not byname[n]['size'] or byname[n]['size']%24: raise SystemExit('Missing/invalid FIPS relocation section '+n)
+          syms={}
+          for sec in secs:
+              if sec['type']!=2: continue
+              strings_sec=secs[sec['link']]
+              strings=blob[strings_sec['off']:strings_sec['off']+strings_sec['size']]
+              ent=sec['entsize'] or 24
+              for i in range(sec['size']//ent):
+                  no,info,other,ndx,val,size=struct.unpack_from('<IBBHQQ',blob,sec['off']+i*ent)
+                  if no and ndx<len(secs): syms.setdefault(cstr(strings,no),set()).add((ndx,val,size))
+          def sym(n):
+              a=syms.get(n,set())
+              if len(a)!=1: raise SystemExit(f'Expected one definition of {n}, found {len(a)}')
+              return next(iter(a))
+          def span(first,last):
+              a,av,_=sym(first); b,bv,_=sym(last)
+              if a!=b or not 0<=av<bv<=secs[a]['size']: raise SystemExit(f'Invalid authenticated range {first}..{last}')
+              sec=secs[a]
+              return blob[sec['off']+av:sec['off']+bv]
+          kn,kv,ks=sym('fips140_integ_hmac_key'); sec=secs[kn]
+          start=sec['off']+kv; end=start+ks if ks else sec['off']+sec['size']
+          rawkey=blob[start:end]
+          if b'\0' not in rawkey or not rawkey.split(b'\0',1)[0]: raise SystemExit('Invalid embedded FIPS HMAC key')
+          key=rawkey.split(b'\0',1)[0]
+          dn,dv,ds=sym('fips140_integ_hmac_digest')
+          if ds<32: raise SystemExit('Embedded FIPS digest field too short')
+          stored=blob[secs[dn]['off']+dv:secs[dn]['off']+dv+32]
+          textdata=span('__fips140_text_start','__fips140_text_end')
+          rodata=span('__fips140_rodata_start','__fips140_rodata_end')
+          actual=hmac.new(key,textdata+rodata,hashlib.sha256).digest()
+          if not hmac.compare_digest(stored,actual): raise SystemExit('Independent final-module HMAC-SHA256 mismatch')
+          report=Path(sys.argv[2]).read_text()
+          expected={
+              'Module SHA-256':hashlib.sha256(blob).hexdigest(),
+              'Embedded HMAC-SHA256':actual.hex(),
+              'HMAC key SHA-256':hashlib.sha256(key).hexdigest(),
+              'Authenticated .text SHA-256':hashlib.sha256(textdata).hexdigest(),
+              'Authenticated .rodata SHA-256':hashlib.sha256(rodata).hexdigest(),
+              'HMAC key length':f'{len(key)} bytes',
+              'Covered .text bytes':str(len(textdata)),
+              'Covered .rodata bytes':str(len(rodata)),
+          }
+          for label,value in expected.items():
+              if not re.search(r'^'+re.escape(label)+r':\\s*'+re.escape(value)+r'          e2fsck -fn "$DIST/vendor_dlkm.img" > audit-report/vendor-dlkm-fsck.txt 2>&1
+          e2fsck -fn "$DIST/system_dlkm.img" > audit-report/system-dlkm-fsck.txt 2>&1
+          sudo debugfs -R "rdump / $GITHUB_WORKSPACE/vendor-dlkm-root" "$DIST/vendor_dlkm.img" > audit-report/vendor-dlkm-extract.txt 2>&1
+          sudo debugfs -R "rdump / $GITHUB_WORKSPACE/system-dlkm-root" "$DIST/system_dlkm.img" > audit-report/system-dlkm-extract.txt 2>&1
+          sudo chown -R "$(id -u):$(id -g)" vendor-dlkm-root system-dlkm-root
+          if grep -Eqi 'Operation not permitted|Permission denied|rdump:.*error|dump_file:.*error' audit-report/vendor-dlkm-extract.txt audit-report/system-dlkm-extract.txt; then
+            echo "DLKM extraction reported errors; refusing to certify partial filesystem contents."
+            exit 1
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          mods=[p for r in [Path('vendor-dlkm-root'),Path('system-dlkm-root')] for p in r.rglob('*.ko')]
+          names={p.name for p in mods}
+          for x in ['cfg80211.ko','mac80211.ko']:
+              if x not in names: raise SystemExit('Required DLKM module missing: '+x)
+          bad=[p for p in mods if re.search(r'(rtl8187|mt76|ksu)\S*\.ko$',p.name,re.I)]
+          if bad: raise SystemExit('Excluded DLKM module found: '+str(bad[:10]))
+          print('DLKM modules:',len(mods),'required wireless present; RTL8187/MT76/KernelSU absent: PASS')
+          PY
+          curl -fsSL 'https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/unpack_bootimg.py?format=TEXT' | base64 -d > unpack_bootimg.py
+          python3 unpack_bootimg.py --boot_img "$DIST/vendor_kernel_boot.img" --out unpacked 2>&1 | tee audit-report/unpack-vendor-boot.txt
+          find unpacked -maxdepth 1 -type f -name 'vendor_ramdisk*' -print | sort > audit-report/vendor-ramdisk-parts.txt
+          grep -q . audit-report/vendor-ramdisk-parts.txt
+          i=0
+          while IFS= read -r part; do
+            i=$((i+1)); dest="ramdisk-extracted/part-$i"; mkdir -p "$dest"
+            if lz4 -t "$part" >/dev/null 2>&1; then lz4 -dc "$part" | (cd "$dest" && cpio -idm --quiet)
+            elif gzip -t "$part" >/dev/null 2>&1; then gzip -dc "$part" | (cd "$dest" && cpio -idm --quiet)
+            elif zstd -t "$part" >/dev/null 2>&1; then zstd -dc "$part" | (cd "$dest" && cpio -idm --quiet)
+            else (cd "$dest" && cpio -idm --quiet < "$GITHUB_WORKSPACE/$part"); fi
+          done < audit-report/vendor-ramdisk-parts.txt
+          find ramdisk-extracted -type f \( -name modules.load -o -name fips140.ko -o -name ufs-pixel-fips140.ko \) -printf '%p %s bytes\n' | sort > audit-report/ramdisk-critical-files.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re
+          roots=list(Path('ramdisk-extracted').glob('part-*'))
+          loads=[p for r in roots for p in r.rglob('modules.load')]
+          ko=[p for r in roots for p in r.rglob('*.ko')]
+          if not loads or not any(p.name=='fips140.ko' for p in ko) or not any(p.name=='ufs-pixel-fips140.ko' for p in ko):
+              raise SystemExit('FIPS or UFS FIPS module/modules.load missing from actual vendor ramdisk')
+          h=hashlib.sha256(Path('artifact/build-report/package/out/shusky/dist/fips140.ko').read_bytes()).hexdigest()
+          if not any(hashlib.sha256(p.read_bytes()).hexdigest()==h for p in ko if p.name=='fips140.ko'):
+              raise SystemExit('Ramdisk fips140.ko differs from final dist module')
+          order=False; missing=[]; entries=[]
+          for load in loads:
+              es=[x.strip() for x in load.read_text(errors='replace').splitlines() if x.strip() and not x.lstrip().startswith('#')]
+              entries.extend(es)
+              f=[i for i,x in enumerate(es) if x.endswith('/fips140.ko')]
+              u=[i for i,x in enumerate(es) if x.endswith('/ufs-pixel-fips140.ko')]
+              if f and u and f[0]<u[0]: order=True
+              for e in es:
+                  found=[p for p in ko if p.as_posix().endswith('/'+e) or p.as_posix().endswith(e)]
+                  if len(found)!=1: missing.append((str(load),e,len(found)))
+          if not order: raise SystemExit('FIPS module does not precede UFS FIPS module in the same modules.load')
+          if missing: raise SystemExit(f'Module-load paths not uniquely resolved: {missing[:5]}')
+          bad=[p for p in ko if re.search(r'(rtl8187|mt76|ksu)\S*\.ko$',p.name,re.I)]
+          if bad: raise SystemExit('Excluded module found in vendor ramdisk: '+str(bad[:10]))
+          print('Vendor ramdisk fragments:',len(roots),'modules.load:',len(loads),'entries:',len(entries),'module files:',len(ko))
+          print('FIPS load order, module presence/hash, all module paths, exclusions: PASS')
+          PY
+          {
+            echo "Source run: $SOURCE_RUN_ID"
+            echo "Source commit: $SOURCE_SHA"
+            echo "Independent artifact audit: PASS"
+            echo "Final images, DLKM filesystems, Native FIPS and vendor ramdisk: PASS"
+          } | tee audit-report/AUDIT-PASS.txt
+
+      - name: Upload independent audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-independent-audit-${{ steps.source.outputs.SOURCE_RUN_ID }}
+          path: audit-report/
+          if-no-files-found: warn
+          retention-days: 30
+,report,re.M):
+                  raise SystemExit('Independent result disagrees with build report: '+label)
+          lines=['Independent final artifact HMAC-SHA256 recomputation: PASS']+[f'{k}: {v}' for k,v in expected.items()]
+          Path('audit-report/fips-hmac-independent.txt').write_text('\\n'.join(lines)+'\\n')
+          print('\\n'.join(lines))
+          PY
           e2fsck -fn "$DIST/vendor_dlkm.img" > audit-report/vendor-dlkm-fsck.txt 2>&1
           e2fsck -fn "$DIST/system_dlkm.img" > audit-report/system-dlkm-fsck.txt 2>&1
-          debugfs -R "rdump / $GITHUB_WORKSPACE/vendor-dlkm-root" "$DIST/vendor_dlkm.img" > audit-report/vendor-dlkm-extract.txt 2>&1
-          debugfs -R "rdump / $GITHUB_WORKSPACE/system-dlkm-root" "$DIST/system_dlkm.img" > audit-report/system-dlkm-extract.txt 2>&1
+          sudo debugfs -R "rdump / $GITHUB_WORKSPACE/vendor-dlkm-root" "$DIST/vendor_dlkm.img" > audit-report/vendor-dlkm-extract.txt 2>&1
+          sudo debugfs -R "rdump / $GITHUB_WORKSPACE/system-dlkm-root" "$DIST/system_dlkm.img" > audit-report/system-dlkm-extract.txt 2>&1
+          sudo chown -R "$(id -u):$(id -g)" vendor-dlkm-root system-dlkm-root
+          if grep -Eqi 'Operation not permitted|Permission denied|rdump:.*error|dump_file:.*error' audit-report/vendor-dlkm-extract.txt audit-report/system-dlkm-extract.txt; then
+            echo "DLKM extraction reported errors; refusing to certify partial filesystem contents."
+            exit 1
+          fi
           python3 - <<'PY'
           from pathlib import Path
           import re
