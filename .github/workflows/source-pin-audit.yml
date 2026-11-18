@@ -489,14 +489,43 @@ jobs:
                       continue
                   hits = [
                       (i, line) for i, line in enumerate(lines)
-                      if "gs_undefined" in line or "bcmdhd4398" in line
+                      if any(token in line for token in (
+                          "gs_undefined", "gs_soc_module", "gs_soc_headers",
+                          "bcmdhd4398", "--//private/google-modules/soc/gs",
+                      ))
                   ]
                   if hits:
                       print(f"\n--- {path} ---")
                       for i, line in hits:
                           print(f"{i + 1}: {line}")
 
-          print("\n=== Git revisions for the exact failing source directories ===")
+          print("\n=== All gs/SoC Bazel configuration references across device and module trees ===")
+          for base in (root / "private/google-modules", root / "private/devices/google"):
+              for path in sorted(base.rglob("*")):
+                  if not path.is_file() or path.name == ".git":
+                      continue
+                  if path.name.startswith("BUILD") or path.suffix in (".bzl", ".bazelrc", ".rc"):
+                      try:
+                          lines = path.read_text(errors="replace").splitlines()
+                      except OSError:
+                          continue
+                      hits = [
+                          (i, line) for i, line in enumerate(lines)
+                          if "gs_soc_module" in line or "gs_undefined" in line
+                      ]
+                      if hits:
+                          print(f"\\n--- {path} ---")
+                          for i, line in hits:
+                              print(f"{i + 1}: {line}")
+
+          gs_dir = root / "private/google-modules/soc/gs"
+          print("\\n=== Files under private/google-modules/soc/gs ===")
+          if gs_dir.exists():
+              for path in sorted(gs_dir.rglob("*")):
+                  if path.is_file() and (path.name.startswith("BUILD") or path.suffix in (".bzl", ".mk", ".config")):
+                      print(path)
+
+                    print("\n=== Git revisions for the exact failing source directories ===")
           for directory in (
               "private/google-modules/wlan",
               "private/google-modules/soc",
