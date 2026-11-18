@@ -124,6 +124,12 @@ jobs:
           for n in required:
               p=d/n
               if not p.is_file() or p.stat().st_size==0: raise SystemExit('Missing/empty final output: '+n)
+          source_info=(root/'kernel-common-commit.txt').read_text()
+          if 'fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462' not in source_info or '6.1.145-android14-11-gfa1d6308d1fe' not in source_info:
+              raise SystemExit('Artifact was not built from the exact Pixel 8 GKI 6.1.145 source')
+          build_log=(root/'build.log').read_text(errors='replace')
+          if 'KMI or sublevel mismatch before running make modules_install' in build_log:
+              raise SystemExit('Kleaf reported a kernel/KMI sublevel mismatch')
           cfg=(root/'fips-config.txt').read_text()
           for x in ['CONFIG_CRYPTO_FIPS140_MOD=m','CONFIG_MODULES=y','CONFIG_MODVERSIONS=y','CONFIG_CFG80211=m','CONFIG_MAC80211=m','CONFIG_USB=y']:
               if x not in cfg: raise SystemExit('Required config missing: '+x)
@@ -411,6 +417,7 @@ jobs:
             echo "Source run: ${{ steps.source.outputs.SOURCE_RUN_ID }}"
             echo "Source commit: ${{ steps.source.outputs.SOURCE_SHA }}"
             echo "Independent artifact audit: PASS"
+            echo "Exact GKI kernel source, module release, and FIPS symbol CRC checks: PASS"
             echo "Final images, DLKM filesystems, Native FIPS HMAC, and vendor ramdisk: PASS"
           } | tee audit-report/AUDIT-PASS.txt
 
