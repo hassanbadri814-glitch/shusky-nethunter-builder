@@ -581,6 +581,26 @@ jobs:
           ]
           if fips_defconfig.read_text().splitlines() != expected_fragment:
               raise SystemExit("Native FIPS defconfig fragment content differs from the intended exact settings")
+          print("All ARM64_MODULE_PLTS definitions, selections, defaults and config assignments:")
+          for base in (Path("aosp"), Path("common"), Path("private/devices/google")):
+              if not base.exists():
+                  continue
+              for path in sorted(base.rglob("*")):
+                  if not path.is_file() or path.suffix in (".git", ".bin"):
+                      continue
+                  if not (path.name.startswith("Kconfig") or "defconfig" in path.name or path.suffix in (".config", ".fragment")):
+                      continue
+                  try:
+                      lines = path.read_text(errors="replace").splitlines()
+                  except OSError:
+                      continue
+                  hits = [(number, line.strip()) for number, line in enumerate(lines, 1)
+                          if "ARM64_MODULE_PLTS" in line]
+                  if hits:
+                      print(f"--- {path} ---")
+                      for number, line in hits:
+                          print(f"{number}: {line}")
+
           print("FIPS compiler and ARM64 module-PLT Kconfig definitions:")
           for base in (Path("aosp"), Path("common")):
               for path in base.rglob("Kconfig*"):
