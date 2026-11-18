@@ -545,13 +545,17 @@ jobs:
               else:
                   print(f"{directory}: no Git project root found")
           root_device_bazelrc = root / "device.bazelrc"
-          if root_device_bazelrc.exists() or root_device_bazelrc.is_symlink():
-              raise SystemExit("Unexpected pre-existing root device.bazelrc; refusing to overwrite")
+          if root_device_bazelrc.is_symlink():
+              print("Replacing existing root device.bazelrc symlink:", os.readlink(root_device_bazelrc))
+              root_device_bazelrc.unlink()
+          elif root_device_bazelrc.exists():
+              raise SystemExit("Unexpected regular root device.bazelrc; refusing to overwrite")
           root_device_bazelrc.symlink_to("private/devices/google/shusky/device.bazelrc")
-          print("Created disposable root device.bazelrc symlink for the official Shusky config.")
+          print("Set disposable root device.bazelrc symlink to the exact Shusky config.")
           print("\n=== Verify the official Shusky Bazel config entry points ===")
           for relative in (
               ".bazelrc",
+              "device.bazelrc",
               ".d4.bazelrc",
               ".d5.bazelrc",
               ".d6.bazelrc",
