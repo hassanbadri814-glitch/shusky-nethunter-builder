@@ -286,3 +286,137 @@ jobs:
 
           echo "RESULT: GKI manifest kernel/common pin matches the exact full SHA in the device uname."
           echo "No compilation, image generation, flashing, or phone changes were performed."
+
+  bazel-dependency-audit:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'audit-only') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout builder repository
+        uses: actions/checkout@v4
+
+      - name: Install Repo tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Initialize and sync exact Pixel kernel source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p workspace
+          cd workspace
+          repo init -u https://android.googlesource.com/kernel/manifest -b android-gs-shusky-6.1-android16 --depth=1
+          repo sync -c -j"$(nproc)" --no-clone-bundle --no-tags
+
+      - name: Pin Pixel common source and apply the exact proposed BUILD edits
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+          git -C aosp cat-file -e 8769cc47188c3bdca2a34d39ba0f39a945b85465^{commit}
+          git -C aosp checkout --detach 8769cc47188c3bdca2a34d39ba0f39a945b85465
+          python3 <<'PY'
+          from pathlib import Path
+
+          shusky = Path("private/devices/google/shusky/BUILD.bazel")
+          common = Path("private/devices/google/common/BUILD.bazel")
+          s = shusky.read_text()
+          c = common.read_text()
+          replacements = {
+              '"//common:kernel_aarch64"': '"//common:kernel_aarch64_download_or_build"',
+              '"//common:kernel_aarch64_images"': '"//common:kernel_aarch64_images_download_or_build"',
+              '"//common:kernel_aarch64_gki_boot_image"': '"//common:kernel_aarch64_gki_artifacts_download_or_build"',
+              '"//common:kernel_aarch64_headers"': '"//common:kernel_aarch64_headers_download_or_build"',
+          }
+          for old, new in replacements.items():
+              n = s.count(old)
+              if not n:
+                  raise SystemExit(f"Missing expected Shusky reference: {old}")
+              s = s.replace(old, new)
+              print(f"Patched Shusky {old} -> {new}: {n}")
+          old = 'images = "//common:kernel_aarch64_images"'
+          new = 'images = "//common:kernel_aarch64_images_download_or_build"'
+          if c.count(old) != 1:
+              raise SystemExit("Expected exactly one Google common extracted_system_dlkm images reference")
+          c = c.replace(old, new, 1)
+
+          abi = Path("aosp/android/abi_gki_aarch64_fips140")
+          if not abi.is_file():
+              raise SystemExit(f"Missing Native FIPS ABI list: {abi}")
+          abi_build = Path("aosp/android/BUILD.bazel")
+          if not abi_build.exists():
+              abi_build = Path("aosp/android/BUILD")
+          if not abi_build.exists():
+              raise SystemExit("No aosp/android Bazel package to export FIPS ABI list")
+          abi_text = abi_build.read_text()
+          if "abi_gki_aarch64_fips140" not in abi_text:
+              abi_text += '\nexports_files(["abi_gki_aarch64_fips140"])\n'
+              abi_build.write_text(abi_text)
+          abi_label = "//aosp/android:abi_gki_aarch64_fips140"
+
+          if "additional_kmi_symbol_lists" not in s:
+              anchor = 'kmi_symbol_list = "//common:android/abi_gki_aarch64_pixel",'
+              if s.count(anchor) != 1:
+                  raise SystemExit("Cannot uniquely locate strict Pixel KMI declaration")
+              s = s.replace(anchor, anchor + f'\n    additional_kmi_symbol_lists = ["{abi_label}"],', 1)
+          elif abi_label not in s:
+              raise SystemExit("Existing additional_kmi_symbol_lists does not contain Native FIPS ABI")
+          if '"crypto/fips140.ko"' not in s:
+              anchor = "module_outs = ZUMA_MODULE_OUTS,"
+              if s.count(anchor) != 1:
+                  raise SystemExit("Cannot uniquely locate Shusky module_outs declaration")
+              s = s.replace(anchor, 'module_outs = ZUMA_MODULE_OUTS + ["crypto/fips140.ko"],', 1)
+
+          shusky.write_text(s)
+          common.write_text(c)
+          Path("fips-abi-label.txt").write_text(abi_label)
+          print("Exact proposed Shusky, Google-common and Native FIPS ABI edits applied.")
+          PY
+
+      - name: Run read-only Bazel target and dependency queries (no build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd workspace
+          test -x tools/bazel
+          ABI_LABEL="$(cat fips-abi-label.txt)"
+          BAZEL=(tools/bazel --output_user_root="$RUNNER_TEMP/bazel-query-root")
+          QUERY_FLAGS=(--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build)
+          echo "=== Native FIPS ABI target ==="
+          "${BAZEL[@]}" query "$ABI_LABEL" --output=label
+          echo "=== Shusky distribution target with Native FIPS ABI edits ==="
+          "${BAZEL[@]}" query //private/devices/google/shusky:zuma_shusky_dist --output=label "${QUERY_FLAGS[@]}"
+          echo "=== Prebuilt-aware GKI targets ==="
+          for target in \
+            //common:kernel_aarch64_download_or_build \
+            //common:kernel_aarch64_images_download_or_build \
+            //common:kernel_aarch64_gki_artifacts_download_or_build \
+            //common:kernel_aarch64_headers_download_or_build
+          do
+            "${BAZEL[@]}" query "$target" --output=label
+          done
+          echo "=== Confirm patched Shusky dependency graph contains all required prebuilt-aware aliases ==="
+          "${BAZEL[@]}" query 'deps(//private/devices/google/shusky:zuma_shusky_dist)' --output=label "${QUERY_FLAGS[@]}" > "$RUNNER_TEMP/shusky-deps.txt"
+          for target in \
+            //common:kernel_aarch64_download_or_build \
+            //common:kernel_aarch64_images_download_or_build \
+            //common:kernel_aarch64_gki_artifacts_download_or_build \
+            //common:kernel_aarch64_headers_download_or_build
+          do
+            if ! grep -Fxq "$target" "$RUNNER_TEMP/shusky-deps.txt"; then
+              echo "ERROR: expected prebuilt-aware target is not in the Shusky dependency graph: $target"
+              exit 1
+            fi
+            echo "PASS dependency: $target"
+          done
+          echo "=== Verify Native FIPS and strict Pixel KMI declarations ==="
+          grep -n 'abi_gki_aarch64_pixel' private/devices/google/shusky/BUILD.bazel
+          grep -n "$ABI_LABEL" private/devices/google/shusky/BUILD.bazel
+          grep -n 'crypto/fips140.ko' private/devices/google/shusky/BUILD.bazel
+          echo "READ-ONLY BAZEL QUERY AUDIT: PASS"
+          echo "No bazel build/run/test, kernel compilation, image generation, flashing or phone changes were invoked."
