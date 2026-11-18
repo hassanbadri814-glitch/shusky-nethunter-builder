@@ -301,7 +301,7 @@ jobs:
           ])
           EOF
           fi
-          bazel query "$ABI_LABEL" \
+          tools/bazel query "$ABI_LABEL" \
             --output=label \
             | tee "$REPORT_DIR/fips-abi-bazel-query.txt"
           echo "FIPS_ABI_LABEL=$ABI_LABEL" >> "$GITHUB_ENV"
@@ -383,31 +383,40 @@ jobs:
           echo "=== Confirm Native FIPS kernel label flag exists ==="
           grep -n -A5 -B2 'name = "kernel"' private/devices/google/common/BUILD.bazel
           python3 <<'PY'
+          import subprocess
           from pathlib import Path
-          import re
 
-          workspace = Path("WORKSPACE")
-          resolved = workspace.resolve()
-          text = resolved.read_text()
-          matches = list(re.finditer(r"define_kleaf_workspace\((.*?)\)", text, re.S))
-          if len(matches) != 1:
-              raise SystemExit(f"Expected one define_kleaf_workspace call in {resolved}; found {len(matches)}")
-          if "artifact_url_fmt" not in matches[0].group(1):
-              inner = matches[0].group(1).strip()
-              separator = "" if not inner or inner.endswith(",") else ","
-              replacement = (
-                  "define_kleaf_workspace(" + inner + separator
-                  + '\n    artifact_url_fmt = "https://ci.android.com/builds/submitted/{build_number}/{target}/latest/raw/{filename}",\n'
-                  + ")"
+          kleaf = Path("build/kernel")
+          expected_commit = "6483b5a6b74251440b266536c2dbc902a4fa3cf2"
+          actual_commit = subprocess.check_output(
+              ["git", "-C", str(kleaf), "rev-parse", "HEAD"],
+              text=True,
+          ).strip()
+          if actual_commit != expected_commit:
+              raise SystemExit(
+                  f"ERROR: unexpected Kleaf source revision: {actual_commit}; "
+                  f"expected {expected_commit}"
               )
-              text = text[:matches[0].start()] + replacement + text[matches[0].end():]
-              resolved.write_text(text)
-          kleaf = Path("build/kernel/kleaf/workspace.bzl").read_text()
-          if "artifact_url_fmt = None" not in kleaf:
-              raise SystemExit("Pinned Kleaf workspace macro does not expose artifact_url_fmt")
-          if "ci.android.com/builds/submitted/{build_number}/{target}/latest/raw/{filename}" not in resolved.read_text():
-              raise SystemExit("Public Android CI artifact endpoint was not installed in WORKSPACE")
-          print(f"PASS: {resolved} uses the documented public ci.android.com artifact endpoint")
+
+          download_repo = kleaf / "kleaf/download_repo.bzl"
+          source = download_repo.read_text()
+          internal_url = (
+              "https://androidbuildinternal.googleapis.com/android/internal/build/v3/"
+              "builds/{build_number}/{target}/attempts/latest/artifacts/{filename}/url?redirect=true"
+          )
+          public_url = (
+              "https://ci.android.com/builds/submitted/{build_number}/{target}/latest/raw/{filename}"
+          )
+          if source.count(internal_url) != 1:
+              raise SystemExit(
+                  "ERROR: expected exactly one pinned Kleaf internal artifact URL constant"
+              )
+          download_repo.write_text(source.replace(internal_url, public_url, 1))
+          verified = download_repo.read_text()
+          if public_url not in verified or internal_url in verified:
+              raise SystemExit("ERROR: public GKI artifact URL patch verification failed")
+          print(f"Kleaf source revision: {actual_commit}")
+          print("PASS: pinned Kleaf download_repo.bzl now uses the verified public Android CI artifact endpoint.")
           PY
           echo "GKI prebuilt target routing patch: PASS"
 
@@ -525,34 +534,42 @@ jobs:
           sed -n '1,12p' \
             private/devices/google/zuma/vendor_ramdisk.modules.zuma
 
-      - name: Verify Bazel targets before compilation
+      - name: Verify configured GKI and Native FIPS dependency graph before compilation
         shell: bash
         run: |
           set -euo pipefail
           cd "$WORKSPACE"
-          bazel query "$FIPS_ABI_LABEL" \
-            --output=label
-          bazel query \
-            '//private/devices/google/shusky:zuma_shusky_dist' \
-            --output=label
-          for TARGET in \
-            //common:kernel_aarch64_download_or_build \
-            //common:kernel_aarch64_images_download_or_build \
-            //common:kernel_aarch64_gki_artifacts_download_or_build \
-            //common:kernel_aarch64_headers_download_or_build
+          tools/bazel query "$FIPS_ABI_LABEL" --output=label
+          GKI_FLAGS=(
+            --use_prebuilt_gki=14691759
+            --action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759
+          )
+          SHUSKY_FLAGS=(
+            --//private/devices/google/common:kernel=//private/devices/google/shusky:kernel
+            --//private/google-modules/soc/gs:gs_soc_module=//private/devices/google/shusky:zuma_soc.shusky
+            --no//private/devices/google/common:download_prebuilt_gki_fips140
+          )
+          tools/bazel cquery "${GKI_FLAGS[@]}" "${SHUSKY_FLAGS[@]}" \
+            --output=label \
+            'deps(//private/devices/google/shusky:zuma_shusky_dist)' \
+            > "$REPORT_DIR/shusky-configured-dependencies.txt"
+          for REQUIRED in \
+            '@gki_prebuilts//Image.lz4:Image.lz4' \
+            '@gki_prebuilts//kernel-headers.tar.gz:kernel-headers.tar.gz' \
+            '@gki_prebuilts//system_dlkm_staging_archive.tar.gz:system_dlkm_staging_archive.tar.gz' \
+            '@gki_prebuilts//system_dlkm.modules.blocklist:system_dlkm.modules.blocklist' \
+            '@gki_prebuilts//system_dlkm.modules.load:system_dlkm.modules.load'
           do
-            bazel query "$TARGET" --output=label
+            if ! grep -Fq "$REQUIRED" "$REPORT_DIR/shusky-configured-dependencies.txt"; then
+              echo "ERROR: required GKI prebuilt dependency is absent: $REQUIRED"
+              exit 1
+            fi
+            echo "PASS dependency: $REQUIRED"
           done
-          grep -n \
-            'abi_gki_aarch64_pixel' \
-            private/devices/google/shusky/BUILD.bazel
-          grep -n \
-            "$FIPS_ABI_LABEL" \
-            private/devices/google/shusky/BUILD.bazel
-          grep -n \
-            'crypto/fips140.ko' \
-            private/devices/google/shusky/BUILD.bazel
-          echo "Pre-build verification: PASS" \
+          grep -n 'abi_gki_aarch64_pixel' private/devices/google/shusky/BUILD.bazel
+          grep -n "$FIPS_ABI_LABEL" private/devices/google/shusky/BUILD.bazel
+          grep -n 'crypto/fips140.ko' private/devices/google/shusky/BUILD.bazel
+          echo "Configured GKI and Native FIPS dependency graph: PASS" \
             | tee "$REPORT_DIR/pre-build-verification.txt"
 
       - name: Build Shusky Native FIPS kernel
@@ -560,15 +577,18 @@ jobs:
         run: |
           set -euo pipefail
           cd "$WORKSPACE"
-          ./private/devices/google/shusky/build_shusky.sh \
+          tools/bazel run \
+            --config=stamp \
             --kernel_package=@//aosp \
             --use_prebuilt_gki=14691759 \
             --action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759 \
-            --//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build \
+            --//private/devices/google/common:kernel=//private/devices/google/shusky:kernel \
+            --//private/google-modules/soc/gs:gs_soc_module=//private/devices/google/shusky:zuma_soc.shusky \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
             --verbose_failures \
             --sandbox_debug \
             --disk_cache="$WORKSPACE/.bazel-disk-cache" \
+            //private/devices/google/shusky:zuma_shusky_dist \
             2>&1 | tee "$REPORT_DIR/build.log"
 
       - name: Preserve generated vendor_kernel_boot image
