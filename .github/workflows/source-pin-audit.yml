@@ -554,6 +554,7 @@ jobs:
               "private/devices/google/shusky/build_shusky.sh",
               "tools/bazel",
               "build/kernel/kleaf/bazel.sh",
+              "build/kernel/kleaf/bazel.py",
               "build/kernel/kleaf/common.bazelrc",
           ):
               path = root / relative
@@ -595,7 +596,7 @@ jobs:
           # Match the production build invocation exactly. Without this flag,
           # Kleaf falls back to its default GKI build-number map (13202960).
           GKI_FLAGS=(--use_prebuilt_gki=14691759 --action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759)
-          QUERY_FLAGS=(--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build --//private/google-modules/soc/gs:gs_soc_module=//private/devices/google/shusky:zuma_soc.shusky --no//private/devices/google/common:download_prebuilt_gki_fips140)
+          QUERY_FLAGS=(--//private/devices/google/common:kernel=//private/devices/google/shusky:kernel --//private/google-modules/soc/gs:gs_soc_module=//private/devices/google/shusky:zuma_soc.shusky --no//private/devices/google/common:download_prebuilt_gki_fips140)
           echo "=== Native FIPS ABI target ==="
           "${BAZEL[@]}" query "$ABI_LABEL" --output=label
           echo "=== Shusky distribution target with Native FIPS ABI edits ==="
