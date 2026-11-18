@@ -38,7 +38,15 @@ jobs:
               "Kleaf GKI repository build-number map":
                   "--action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759",
               "Native FIPS kernel label override":
-                  "--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build",
+                  "--//private/devices/google/common:kernel=//private/devices/google/shusky:kernel",
+              "Shusky SoC module provider override":
+                  "--//private/google-modules/soc/gs:gs_soc_module=//private/devices/google/shusky:zuma_soc.shusky",
+              "verified public Android CI artifact endpoint":
+                  "https://ci.android.com/builds/submitted/{build_number}/{target}/latest/raw/{filename}",
+              "Kleaf artifact URL patch":
+                  "build/kernel/kleaf/download_repo.bzl",
+              "build uses Kleaf Bazel wrapper":
+                  "tools/bazel run",
               "native FIPS compilation (not prebuilt module)":
                   "--no//private/devices/google/common:download_prebuilt_gki_fips140",
               "GKI kernel target alias":
@@ -60,6 +68,9 @@ jobs:
           forbidden = {
               "incorrect installed-kernel source pin": "164ae0b804dd",
               "explicit source-build GKI setting": "--//build/kernel/kleaf:use_prebuilt_gki=false",
+              "incorrect common-kernel override to generic GKI": "--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build",
+              "unsupported artifact_url_fmt workspace parameter": "artifact_url_fmt",
+              "build script with missing Shusky config": "build_shusky.sh",
           }
           for label, value in forbidden.items():
               if value in workflow:
@@ -544,14 +555,6 @@ jobs:
                   print(f"{directory}: {top} @ {sha}")
               else:
                   print(f"{directory}: no Git project root found")
-          root_device_bazelrc = root / "device.bazelrc"
-          if root_device_bazelrc.is_symlink():
-              print("Replacing existing root device.bazelrc symlink:", os.readlink(root_device_bazelrc))
-              root_device_bazelrc.unlink()
-          elif root_device_bazelrc.exists():
-              raise SystemExit("Unexpected regular root device.bazelrc; refusing to overwrite")
-          root_device_bazelrc.symlink_to("private/devices/google/shusky/device.bazelrc")
-          print("Set disposable root device.bazelrc symlink to the exact Shusky config.")
           print("\n=== Verify the official Shusky Bazel config entry points ===")
           for relative in (
               ".bazelrc",
@@ -605,7 +608,7 @@ jobs:
           # Match the production build invocation exactly. Without this flag,
           # Kleaf falls back to its default GKI build-number map (13202960).
           GKI_FLAGS=(--use_prebuilt_gki=14691759 --action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759)
-          QUERY_FLAGS=(--config=shusky --no//private/devices/google/common:download_prebuilt_gki_fips140)
+          QUERY_FLAGS=(--//private/devices/google/common:kernel=//private/devices/google/shusky:kernel --//private/google-modules/soc/gs:gs_soc_module=//private/devices/google/shusky:zuma_soc.shusky --no//private/devices/google/common:download_prebuilt_gki_fips140)
           echo "=== Native FIPS ABI target ==="
           "${BAZEL[@]}" query "$ABI_LABEL" --output=label
           echo "=== Shusky distribution target with Native FIPS ABI edits ==="
