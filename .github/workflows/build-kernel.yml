@@ -729,49 +729,197 @@ jobs:
             "$REPORT_DIR/fips140-sections.txt"
           echo "FIPS relocation sections: PASS"
 
-      - name: Collect FIPS HMAC execution evidence
+      - name: Verify exact Native FIPS HMAC postlink execution and digest
         if: success()
         shell: bash
         run: |
           set -euo pipefail
           cd "$WORKSPACE"
-          grep -n -B8 -A18 \
-            'CMD_FIPS140_GEN_HMAC\|cmd_gen_hmac\|fips140.ko' \
-            aosp/arch/arm64/Makefile.postlink \
-            | tee "$REPORT_DIR/fips-hmac-rule.txt"
-          grep -niE \
-            'fips140_gen_hmac|cmd_gen_hmac|gen_hmac' \
-            "$REPORT_DIR/build.log" \
-            | tee "$REPORT_DIR/fips-hmac-build-log.txt" || true
-          find . -type f \
-            \( -name '*.cmd' -o -name '*.log' \) \
-            -not -path './build-report/*' \
-            -print0 \
-            | xargs -0 -r grep -niE \
-              'fips140_gen_hmac|cmd_gen_hmac|gen_hmac' \
-              2>/dev/null \
-            | tee "$REPORT_DIR/fips-hmac-command-evidence.txt" || true
-          MODULE="$(find . -type f -path '*/crypto/fips140.ko' -not -path './build-report/*' -print -quit)"
-          if [ -z "$MODULE" ]; then
-            echo "ERROR: cannot verify HMAC execution because crypto/fips140.ko is missing."
-            exit 1
-          fi
-          if ! grep -Eiq 'fips140_gen_hmac|cmd_gen_hmac|gen_hmac' "$REPORT_DIR/fips-hmac-build-log.txt" "$REPORT_DIR/fips-hmac-command-evidence.txt"; then
-            echo "ERROR: no generated build-log or command-file evidence proves that the Native FIPS HMAC generator was invoked."
-            exit 1
-          fi
-          if ! grep -Eiq 'fips140\.ko' "$REPORT_DIR/fips-hmac-command-evidence.txt" "$REPORT_DIR/fips-hmac-build-log.txt"; then
-            echo "ERROR: HMAC invocation evidence does not identify the fips140.ko target."
-            exit 1
-          fi
-          {
-            echo "HMAC execution evidence: PASS"
-            echo "Module: $MODULE"
-            sha256sum "$MODULE"
-            echo "Evidence files:"
-            ls -l "$REPORT_DIR/fips-hmac-build-log.txt" "$REPORT_DIR/fips-hmac-command-evidence.txt"
-          } | tee "$REPORT_DIR/fips-hmac-execution-verification.txt"
 
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          postlink = Path("aosp/arch/arm64/Makefile.postlink").read_text()
+          generator = Path("aosp/crypto/fips140_gen_hmac.c").read_text()
+          required = (
+              "CMD_FIPS140_GEN_HMAC = crypto/fips140_gen_hmac",
+              "quiet_cmd_gen_hmac = HMAC",
+              "$(objtree)/crypto/fips140.ko: FORCE",
+              "$(call cmd,gen_hmac)",
+              "$(CMD_FIPS140_GEN_HMAC) $@",
+          )
+          for fragment in required:
+              if fragment not in postlink:
+                  raise SystemExit(f"ERROR: pinned Makefile.postlink lacks: {fragment}")
+          if not re.search(r"(?m)^quiet_cmd_gen_hmac\s*=\s*HMAC\s+\$@", postlink):
+              raise SystemExit("ERROR: HMAC log label is not bound to Kbuild target $@")
+          generator_tokens = (
+              "fips140_integ_hmac_key", "fips140_integ_hmac_digest",
+              "__fips140_text_start", "__fips140_text_end",
+              "__fips140_rodata_start", "__fips140_rodata_end",
+              "HMAC_Init_ex", "EVP_sha256()", "HMAC_Update", "HMAC_Final",
+          )
+          for token in generator_tokens:
+              if token not in generator:
+                  raise SystemExit(f"ERROR: pinned HMAC generator lacks: {token}")
+          print("Pinned Kbuild target rule and SHA-256 generator implementation: PASS")
+          PY
+
+          python3 - "$REPORT_DIR/build.log" "$REPORT_DIR/fips-hmac-target-log.txt" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          log = Path(sys.argv[1]).read_text(errors="replace")
+          pattern = re.compile(r"(^|[ \t])HMAC[ \t]+(?:\S*/)?crypto/fips140\.ko(?:[ \t]|$)")
+          matches = [line for line in log.splitlines() if pattern.search(line)]
+          if not matches:
+              raise SystemExit("ERROR: no Kbuild HMAC log line targets crypto/fips140.ko")
+          Path(sys.argv[2]).write_text("\n".join(matches) + "\n")
+          print(f"Exact Kbuild HMAC target log: PASS ({len(matches)} invocation line(s))")
+          print("\n".join(matches))
+          PY
+
+          if ! find out -type f -path '*/crypto/fips140.ko' \
+            -not -path './build-report/*' -print -quit | grep -q .; then
+            echo "ERROR: no generated crypto/fips140.ko candidate exists under out/."
+            exit 1
+          fi
+          find out -type f -path '*/crypto/fips140.ko' \
+            -not -path './build-report/*' -print | sort \
+            > "$REPORT_DIR/fips-hmac-module-candidates.txt"
+
+          python3 - "$REPORT_DIR" "$REPORT_DIR/fips-hmac-module-candidates.txt" <<'PY'
+          import hashlib, hmac, struct, sys
+          from pathlib import Path
+
+          report = Path(sys.argv[1])
+          candidates = [Path(p) for p in Path(sys.argv[2]).read_text().splitlines() if p]
+          verified, rejected = [], []
+
+          def cstr(table, offset):
+              if offset < 0 or offset >= len(table):
+                  raise ValueError("string-table offset out of bounds")
+              end = table.find(b"\0", offset)
+              if end < 0:
+                  raise ValueError("unterminated ELF string")
+              return table[offset:end].decode("utf-8", "replace")
+
+          def verify(path):
+              blob = path.read_bytes()
+              if len(blob) < 64 or blob[:4] != b"\x7fELF" or blob[4:6] != b"\x02\x01":
+                  raise ValueError("not ELF64 little-endian")
+              hdr = struct.unpack_from("<16sHHIQQQIHHHHHH", blob, 0)
+              if hdr[1] != 1 or hdr[2] != 183:
+                  raise ValueError("not relocatable AArch64 ELF")
+              shoff, shentsize, shnum, shstrndx = hdr[6], hdr[11], hdr[12], hdr[13]
+              if shentsize < 64 or not shnum or shstrndx >= shnum:
+                  raise ValueError("invalid section-header table")
+              secs = []
+              for i in range(shnum):
+                  v = struct.unpack_from("<IIQQQQIIQQ", blob, shoff + i * shentsize)
+                  secs.append({"nameoff":v[0],"type":v[1],"off":v[4],"size":v[5],
+                               "link":v[6],"entsize":v[9]})
+              st = secs[shstrndx]
+              names = blob[st["off"]:st["off"]+st["size"]]
+              for s in secs:
+                  s["name"] = cstr(names, s["nameoff"])
+              byname = {s["name"]:s for s in secs}
+              for name in (".init.rela.text", ".init.rela.rodata"):
+                  s = byname.get(name)
+                  if not s or not s["size"] or s["size"] % 24:
+                      raise ValueError(f"missing/invalid {name}")
+
+              syms = {}
+              for s in secs:
+                  if s["type"] != 2:
+                      continue
+                  if s["link"] >= len(secs):
+                      raise ValueError("bad symtab string-table link")
+                  strings_sec = secs[s["link"]]
+                  strings = blob[strings_sec["off"]:strings_sec["off"]+strings_sec["size"]]
+                  ent = s["entsize"] or 24
+                  if ent < 24:
+                      raise ValueError("bad ELF64 symbol entry size")
+                  for i in range(s["size"] // ent):
+                      nameoff, info, other, ndx, value, size = struct.unpack_from(
+                          "<IBBHQQ", blob, s["off"]+i*ent)
+                      if nameoff and ndx < len(secs):
+                          name = cstr(strings, nameoff)
+                          syms.setdefault(name, set()).add((ndx,value,size))
+
+              def sym(name):
+                  found = syms.get(name, set())
+                  if len(found) != 1:
+                      raise ValueError(f"expected one defined {name}; found {len(found)}")
+                  ndx,value,size = next(iter(found))
+                  return ndx,value,size
+
+              def span(first,last):
+                  a, av, _ = sym(first)
+                  b, bv, _ = sym(last)
+                  if a != b or not 0 <= av < bv <= secs[a]["size"]:
+                      raise ValueError(f"invalid symbol range {first}..{last}")
+                  s = secs[a]
+                  return blob[s["off"]+av:s["off"]+bv]
+
+              kn, kv, ks = sym("fips140_integ_hmac_key")
+              keysec = secs[kn]
+              ko = keysec["off"] + kv
+              kend = ko + ks if ks else keysec["off"] + keysec["size"]
+              kb = blob[ko:kend]
+              if b"\0" not in kb or not kb.split(b"\0",1)[0]:
+                  raise ValueError("HMAC key is empty or not NUL-terminated")
+              key = kb.split(b"\0",1)[0]
+
+              dn, dv, ds = sym("fips140_integ_hmac_digest")
+              if ds < 32:
+                  raise ValueError("digest symbol is smaller than SHA-256")
+              digestsec = secs[dn]
+              stored = blob[digestsec["off"]+dv:digestsec["off"]+dv+32]
+              textdata = span("__fips140_text_start","__fips140_text_end")
+              rodata = span("__fips140_rodata_start","__fips140_rodata_end")
+              calculated = hmac.new(key,textdata+rodata,hashlib.sha256).digest()
+              if not hmac.compare_digest(stored,calculated):
+                  raise ValueError("embedded digest differs from independently recomputed HMAC-SHA256")
+              return {
+                  "path":str(path),"sha256":hashlib.sha256(blob).hexdigest(),
+                  "hmac":calculated.hex(),"key_bytes":len(key),
+                  "text_bytes":len(textdata),"rodata_bytes":len(rodata),
+                  "rela_text":byname[".init.rela.text"]["size"],
+                  "rela_rodata":byname[".init.rela.rodata"]["size"],
+              }
+
+          for p in candidates:
+              try:
+                  verified.append(verify(p))
+              except Exception as e:
+                  rejected.append(f"{p}: {e}")
+          if not verified:
+              raise SystemExit("ERROR: no module passed independent HMAC verification:\n"+"\n".join(rejected[:30]))
+          if len({x["sha256"] for x in verified}) != 1 or len({x["hmac"] for x in verified}) != 1:
+              raise SystemExit("ERROR: independently verified module candidates disagree")
+          v = verified[0]
+          lines = [
+              "Kbuild target-specific HMAC log: PASS",
+              "Independent embedded HMAC-SHA256 recomputation: PASS",
+              f"Verified module candidates: {len(verified)}",
+              f"Module SHA-256: {v['sha256']}",
+              f"Embedded HMAC-SHA256: {v['hmac']}",
+              f"HMAC key length: {v['key_bytes']} bytes",
+              f"Covered .text bytes: {v['text_bytes']}",
+              f"Covered .rodata bytes: {v['rodata_bytes']}",
+              f".init.rela.text bytes: {v['rela_text']}",
+              f".init.rela.rodata bytes: {v['rela_rodata']}",
+              "Verified module paths:",
+          ]
+          lines.extend("  "+x["path"] for x in verified)
+          if rejected:
+              lines.append("Non-final or non-verifiable candidates skipped:")
+              lines.extend("  "+x for x in rejected[:30])
+          (report/"fips-hmac-execution-verification.txt").write_text("\n".join(lines)+"\n")
+          print("\n".join(lines))
+          PY
       - name: Verify generated vendor ramdisk modules.load
         if: success()
         shell: bash
