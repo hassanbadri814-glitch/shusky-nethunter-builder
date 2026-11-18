@@ -434,6 +434,19 @@ jobs:
           if zuma_lines.count(fips_entry) != 1:
               raise SystemExit("FIPS module must occur exactly once in the Zuma ramdisk list")
 
+          print("First 120 entries in the exact Zuma vendor ramdisk load list:")
+          for number, line in enumerate(zuma_lines[:120], 1):
+              print(f"{number}: {line}")
+          soc_positions = [
+              (number, line) for number, line in enumerate(zuma_lines, 1)
+              if "private/google-modules/soc/gs/" in line
+          ]
+          if soc_positions:
+              print("First/last Google SoC module positions:", soc_positions[0], soc_positions[-1])
+          print("Shusky-specific ramdisk list, in source order:")
+          for number, line in enumerate(shusky_ramdisk.read_text().splitlines(), 1):
+              print(f"{number}: {line}")
+
           print("FIPS/UFS/IOVAD entries in Zuma ramdisk list:")
           for number, line in enumerate(zuma_lines, 1):
               if any(token in line.lower() for token in ("fips", "ufs", "iovad")):
