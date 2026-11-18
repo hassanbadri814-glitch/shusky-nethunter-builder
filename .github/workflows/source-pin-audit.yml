@@ -35,6 +35,8 @@ jobs:
                   "8769cc47188c3bdca2a34d39ba0f39a945b85465",
               "installed GKI build ID":
                   "--use_prebuilt_gki=14691759",
+              "Kleaf GKI repository build-number map":
+                  "--action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759",
               "Native FIPS kernel label override":
                   "--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build",
               "native FIPS compilation (not prebuilt module)":
@@ -396,7 +398,7 @@ jobs:
           BAZEL=(tools/bazel --output_user_root="$RUNNER_TEMP/bazel-query-root")
           # Match the production build invocation exactly. Without this flag,
           # Kleaf falls back to its default GKI build-number map (13202960).
-          GKI_FLAGS=(--use_prebuilt_gki=14691759)
+          GKI_FLAGS=(--use_prebuilt_gki=14691759 --action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759)
           QUERY_FLAGS=(--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build --no//private/devices/google/common:download_prebuilt_gki_fips140)
           echo "=== Native FIPS ABI target ==="
           "${BAZEL[@]}" query "$ABI_LABEL" --output=label
