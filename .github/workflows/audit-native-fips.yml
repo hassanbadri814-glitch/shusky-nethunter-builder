@@ -205,13 +205,6 @@ jobs:
           print('Vendor ramdisk fragments:',len(roots),'modules.load:',len(loads),'entries:',len(entries),'module files:',len(ko))
           print('FIPS load order, module presence/hash, all module paths, exclusions: PASS')
           PY
-          {
-            echo "Source run: $SOURCE_RUN_ID"
-            echo "Source commit: $SOURCE_SHA"
-            echo "Independent artifact audit: PASS"
-            echo "Final images, DLKM filesystems, Native FIPS and vendor ramdisk: PASS"
-          } | tee audit-report/AUDIT-PASS.txt
-
       - name: Independently recompute HMAC from the packaged final FIPS module
         if: success()
         shell: bash
@@ -298,6 +291,17 @@ jobs:
           Path('audit-report/fips-hmac-independent.txt').write_text('\n'.join(output)+'\n')
           print('\n'.join(output))
           PY
+
+      - name: Finalize independent audit result
+        if: success()
+        shell: bash
+        run: |
+          {
+            echo "Source run: \${{ steps.source.outputs.SOURCE_RUN_ID }}"
+            echo "Source commit: \${{ steps.source.outputs.SOURCE_SHA }}"
+            echo "Independent artifact audit: PASS"
+            echo "Final images, DLKM filesystems, Native FIPS HMAC, and vendor ramdisk: PASS"
+          } | tee audit-report/AUDIT-PASS.txt
 
       - name: Upload independent audit evidence
         if: always()
