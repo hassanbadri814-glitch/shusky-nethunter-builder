@@ -361,8 +361,25 @@ jobs:
           set -euo pipefail
           cd workspace
           GKI_KERNEL_COMMON_COMMIT="fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462"
+          SOURCE_REMOTE=""
+          SOURCE_URL=""
+          while IFS= read -r remote; do
+            url="$(git -C aosp remote get-url "$remote")"
+            case "$url" in
+              *android.googlesource.com/kernel/common*)
+                SOURCE_REMOTE="$remote"
+                SOURCE_URL="$url"
+                break
+                ;;
+            esac
+          done < <(git -C aosp remote)
+          if [ -z "$SOURCE_REMOTE" ]; then
+            echo "ERROR: repo manifest checkout has no kernel/common remote."
+            git -C aosp remote -v
+            exit 1
+          fi
+          echo "Resolved kernel/common remote: $SOURCE_REMOTE ($SOURCE_URL)"
           if ! git -C aosp cat-file -e "$GKI_KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
-            SOURCE_REMOTE="$(git -C aosp remote get-url origin)"
             git -C aosp fetch --no-tags "$SOURCE_REMOTE" "$GKI_KERNEL_COMMON_COMMIT"
           fi
           git -C aosp checkout --detach "$GKI_KERNEL_COMMON_COMMIT"
