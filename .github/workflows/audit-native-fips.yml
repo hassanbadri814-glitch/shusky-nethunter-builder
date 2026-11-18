@@ -409,6 +409,41 @@ jobs:
           print('\n'.join(output))
           PY
 
+      - name: Independently verify every flash image fits the exact stock partition
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          d=Path('artifact/build-report/package/out/shusky/dist')
+          capacities={
+            'boot.img':67108864,
+            'vendor_kernel_boot.img':67108864,
+            'dtbo.img':16777216,
+            'system_dlkm.img':11714560,
+            'vendor_dlkm.img':25559040,
+          }
+          lines=['Independent Pixel 8 Shiba partition-fit audit']
+          failed=[]
+          for name,capacity in capacities.items():
+            p=d/name
+            if not p.is_file():
+              lines.append(f'MISSING {name}')
+              failed.append(name)
+              continue
+            size=p.stat().st_size
+            digest=hashlib.sha256(p.read_bytes()).hexdigest()
+            status='PASS' if size<=capacity else 'FAIL - OVERSIZE'
+            lines.append(f'{name}: size={size} capacity={capacity} delta={capacity-size} status={status} sha256={digest}')
+            if size>capacity: failed.append(name)
+          Path('audit-report/partition-fit-independent.txt').write_text('\\n'.join(lines)+'\\n')
+          print('\\n'.join(lines))
+          if failed:
+            raise SystemExit('FLASH BLOCKED: images exceed stock partition capacities: '+', '.join(failed))
+          PY
+
       - name: Finalize independent audit result
         if: success()
         shell: bash
