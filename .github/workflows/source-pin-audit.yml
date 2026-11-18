@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/source-pin-audit.yml"
+      - ".github/workflows/build-kernel.yml"
   workflow_dispatch:
 
 permissions:
@@ -17,6 +18,57 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Checkout builder workflow for static validation
+        uses: actions/checkout@v4
+
+      - name: Validate GKI prebuilt and Native FIPS workflow wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; YAML.load_file(".github/workflows/build-kernel.yml", aliases: true); puts "Workflow YAML syntax: PASS"'
+          python3 <<'PY'
+          from pathlib import Path
+
+          workflow = Path(".github/workflows/build-kernel.yml").read_text()
+          required = {
+              "exact Pixel device source commit":
+                  "8769cc47188c3bdca2a34d39ba0f39a945b85465",
+              "installed GKI build ID":
+                  "--use_prebuilt_gki=14691759",
+              "Native FIPS kernel label override":
+                  "--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build",
+              "native FIPS compilation (not prebuilt module)":
+                  "--no//private/devices/google/common:download_prebuilt_gki_fips140",
+              "GKI kernel target alias":
+                  "//common:kernel_aarch64_download_or_build",
+              "GKI images target alias":
+                  "//common:kernel_aarch64_images_download_or_build",
+              "GKI artifacts target alias":
+                  "//common:kernel_aarch64_gki_artifacts_download_or_build",
+              "GKI headers target alias":
+                  "//common:kernel_aarch64_headers_download_or_build",
+              "build authorization guard":
+                  "contains(github.event.head_commit.message, 'build-authorized')",
+          }
+          for label, value in required.items():
+              if value not in workflow:
+                  raise SystemExit(f"FAIL: missing {label}: {value}")
+              print(f"PASS: {label}")
+
+          forbidden = {
+              "incorrect installed-kernel source pin": "164ae0b804dd",
+              "explicit source-build GKI setting": "--//build/kernel/kleaf:use_prebuilt_gki=false",
+          }
+          for label, value in forbidden.items():
+              if value in workflow:
+                  raise SystemExit(f"FAIL: forbidden {label}: {value}")
+              print(f"PASS: absent {label}")
+
+          if "build-authorized" in Path(".git/COMMIT_EDITMSG").read_text() if Path(".git/COMMIT_EDITMSG").exists() else False:
+              raise SystemExit("FAIL: authorization marker found in commit edit message")
+          print("Static workflow wiring: PASS")
+          PY
+
       - name: Reconstruct exact GKI build manifest and compare Pixel source pin (audit only)
         shell: bash
         run: |
