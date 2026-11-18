@@ -457,6 +457,7 @@ jobs:
           print("The next step is a read-only Bazel cquery; no build or image target is invoked.")
           PY
           python3 <<'PY'
+          import os
           import subprocess
           from pathlib import Path
 
