@@ -432,6 +432,33 @@ jobs:
           if zuma_lines.count(fips_entry) != 1:
               raise SystemExit("FIPS module must occur exactly once in the Zuma ramdisk list")
 
+          print("FIPS/UFS/IOVAD entries in Zuma ramdisk list:")
+          for number, line in enumerate(zuma_lines, 1):
+              if any(token in line.lower() for token in ("fips", "ufs", "iovad")):
+                  print(f"{number}: {line}")
+          fips_index = zuma_lines.index(fips_entry)
+          print("Zuma ramdisk entries around FIPS module:")
+          for number in range(max(0, fips_index - 5), min(len(zuma_lines), fips_index + 6)):
+              print(f"{number + 1}: {zuma_lines[number]}")
+
+          print("FIPS/UFS/IOVAD module metadata references in Google source:")
+          for base in (Path("private/google-modules"), Path("private/devices/google")):
+              for path in sorted(base.rglob("*")):
+                  if not path.is_file() or (path.suffix not in (".c", ".h", ".bzl", ".bazel") and not path.name.startswith(("BUILD", "Makefile", "Kbuild"))):
+                      continue
+                  try:
+                      lines = path.read_text(errors="replace").splitlines()
+                  except OSError:
+                      continue
+                  hits = [
+                      (number, line.strip()) for number, line in enumerate(lines, 1)
+                      if any(token in line.lower() for token in ("fips140", "ufs-pixel-fips", "iovad-vendor-hooks"))
+                  ]
+                  if hits:
+                      print(f"--- {path} ---")
+                      for number, line in hits:
+                          print(f"{number}: {line}")
+
           kconfig_hits = []
           makefile_hits = []
           for base in (Path("aosp"), Path("common")):
