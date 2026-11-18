@@ -890,6 +890,16 @@ jobs:
               "$url" || true)"
             printf '%-42s HTTP %s\n' "$artifact" "$status"
           done
+          echo "=== Resolve the HTTP 416 ambiguity for the blocklist artifact ==="
+          BLOCKLIST_URL="https://ci.android.com/builds/submitted/14691759/kernel_aarch64/latest/raw/system_dlkm.modules.blocklist"
+          BLOCKLIST_FILE="$RUNNER_TEMP/system_dlkm.modules.blocklist"
+          BLOCKLIST_META="$(curl --silent --show-error --location --fail --max-time 45 \
+            --output "$BLOCKLIST_FILE" --write-out '%{http_code} %{size_download}' \
+            "$BLOCKLIST_URL")"
+          echo "system_dlkm.modules.blocklist GET: $BLOCKLIST_META"
+          echo "Downloaded blocklist bytes: $(wc -c < "$BLOCKLIST_FILE")"
+          sha256sum "$BLOCKLIST_FILE"
+          echo "A successful HTTP 200 GET, including a valid zero-byte file, resolves the earlier range-only HTTP 416."
 
       - name: Run read-only Bazel target and dependency queries (no build)
         shell: bash
@@ -902,6 +912,7 @@ jobs:
           # Match the production build invocation exactly. Without this flag,
           # Kleaf falls back to its default GKI build-number map (13202960).
           GKI_FLAGS=(--use_prebuilt_gki=14691759 --action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759)
+          PRODUCTION_FLAGS=(--config=stamp --config=shusky --kernel_package=@//aosp)
           QUERY_FLAGS=(--//private/devices/google/common:kernel=//private/devices/google/shusky:kernel --//private/google-modules/soc/gs:gs_soc_module=//private/devices/google/shusky:zuma_soc.shusky --no//private/devices/google/common:download_prebuilt_gki_fips140)
           echo "=== Native FIPS ABI target ==="
           "${BAZEL[@]}" query "$ABI_LABEL" --output=label
@@ -921,7 +932,20 @@ jobs:
           echo "=== Confirm patched Shusky dependency graph contains all required prebuilt-aware aliases ==="
           # `query` is unconfigured and traverses inactive select() branches, including the unavailable FIPS prebuilt.
           # `cquery` resolves the actual configuration with the explicit Native FIPS flags, without building.
-          "${BAZEL[@]}" cquery "${GKI_FLAGS[@]}" "${QUERY_FLAGS[@]}" --output=label 'deps(//private/devices/google/shusky:zuma_shusky_dist)' > "$RUNNER_TEMP/shusky-deps.txt"
+          "${BAZEL[@]}" cquery "${PRODUCTION_FLAGS[@]}" "${GKI_FLAGS[@]}" "${QUERY_FLAGS[@]}" --output=label 'deps(//private/devices/google/shusky:zuma_shusky_dist)' > "$RUNNER_TEMP/shusky-deps.txt"
+          for REQUIRED in \
+            '@gki_prebuilts//Image.lz4:Image.lz4' \
+            '@gki_prebuilts//kernel-headers.tar.gz:kernel-headers.tar.gz' \
+            '@gki_prebuilts//system_dlkm_staging_archive.tar.gz:system_dlkm_staging_archive.tar.gz' \
+            '@gki_prebuilts//system_dlkm.modules.blocklist:system_dlkm.modules.blocklist' \
+            '@gki_prebuilts//system_dlkm.modules.load:system_dlkm.modules.load'
+          do
+            if ! grep -Fq "$REQUIRED" "$RUNNER_TEMP/shusky-deps.txt"; then
+              echo "ERROR: required GKI prebuilt dependency is absent: $REQUIRED"
+              exit 1
+            fi
+            echo "PASS dependency: $REQUIRED"
+          done
           echo "=== Resolved kernel/GKI labels in configured dependency graph ==="
           grep -E 'kernel_aarch64|gki_prebuilt' "$RUNNER_TEMP/shusky-deps.txt" | sort -u || true
           for target in \
