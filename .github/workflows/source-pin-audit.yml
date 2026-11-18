@@ -348,16 +348,24 @@ jobs:
           abi = Path("aosp/android/abi_gki_aarch64_fips140")
           if not abi.is_file():
               raise SystemExit(f"Missing Native FIPS ABI list: {abi}")
-          abi_build = Path("aosp/android/BUILD.bazel")
-          if not abi_build.exists():
-              abi_build = Path("aosp/android/BUILD")
-          if not abi_build.exists():
-              raise SystemExit("No aosp/android Bazel package to export FIPS ABI list")
+          abi_name = "abi_gki_aarch64_fips140"
+          candidates = [
+              (Path("aosp/android/BUILD.bazel"), "//aosp/android:", abi_name),
+              (Path("aosp/android/BUILD"), "//aosp/android:", abi_name),
+              (Path("aosp/BUILD.bazel"), "//aosp:", "android/" + abi_name),
+              (Path("aosp/BUILD"), "//aosp:", "android/" + abi_name),
+          ]
+          found = next((item for item in candidates if item[0].is_file()), None)
+          if found is None:
+              raise SystemExit("No AOSP Bazel package found at android/ or aosp/ root")
+          abi_build, abi_prefix, abi_relative = found
+          abi_label = abi_prefix + abi_name if abi_prefix == "//aosp/android:" else abi_prefix + abi_relative
           abi_text = abi_build.read_text()
-          if "abi_gki_aarch64_fips140" not in abi_text:
-              abi_text += '\nexports_files(["abi_gki_aarch64_fips140"])\n'
+          if abi_relative not in abi_text:
+              abi_text += f'\\n# Export Google native FIPS ABI for Shusky.\\nexports_files(["{abi_relative}"])\\n'
               abi_build.write_text(abi_text)
-          abi_label = "//aosp/android:abi_gki_aarch64_fips140"
+          print(f"Native FIPS ABI BUILD package: {abi_build}")
+          print(f"Native FIPS ABI label: {abi_label}")
 
           if "additional_kmi_symbol_lists" not in s:
               anchor = 'kmi_symbol_list = "//common:android/abi_gki_aarch64_pixel",'
