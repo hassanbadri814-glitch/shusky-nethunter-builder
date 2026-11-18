@@ -156,14 +156,24 @@ jobs:
           cd "$WORKSPACE/aosp"
           GKI_KERNEL_COMMON_COMMIT="fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462"
           GKI_KERNEL_RELEASE="6.1.145-android14-11-gfa1d6308d1fe"
-          SOURCE_REMOTE="$(git remote get-url origin)"
-          case "$SOURCE_REMOTE" in
-            *android.googlesource.com/kernel/common*) ;;
-            *)
-              echo "ERROR: unexpected kernel/common remote: $SOURCE_REMOTE"
-              exit 1
-              ;;
-          esac
+          SOURCE_REMOTE=""
+          SOURCE_URL=""
+          while IFS= read -r remote; do
+            url="$(git remote get-url "$remote")"
+            case "$url" in
+              *android.googlesource.com/kernel/common*)
+                SOURCE_REMOTE="$remote"
+                SOURCE_URL="$url"
+                break
+                ;;
+            esac
+          done < <(git remote)
+          if [ -z "$SOURCE_REMOTE" ]; then
+            echo "ERROR: repo manifest checkout has no kernel/common remote."
+            git remote -v
+            exit 1
+          fi
+          echo "Resolved kernel/common remote: $SOURCE_REMOTE ($SOURCE_URL)"
           if ! git cat-file -e "$GKI_KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
             git fetch --no-tags "$SOURCE_REMOTE" "$GKI_KERNEL_COMMON_COMMIT"
           fi
