@@ -31,8 +31,16 @@ jobs:
 
           workflow = Path(".github/workflows/build-kernel.yml").read_text()
           required = {
-              "exact Pixel device source commit":
-                  "8769cc47188c3bdca2a34d39ba0f39a945b85465",
+              "exact GKI kernel/common source commit":
+                  "fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462",
+              "exact GKI kernel release":
+                  "6.1.145-android14-11-gfa1d6308d1fe",
+              "module release compatibility gate":
+                  "modinfo -F vermagic",
+              "FIPS symbol CRC compatibility gate":
+                  "vmlinux.symvers",
+              "Kleaf sublevel mismatch hard failure":
+                  "KMI or sublevel mismatch before running make modules_install",
               "installed GKI build ID":
                   "--use_prebuilt_gki=14691759",
               "Kleaf GKI repository build-number map":
@@ -87,6 +95,7 @@ jobs:
 
           forbidden = {
               "incorrect installed-kernel source pin": "164ae0b804dd",
+              "stale 6.1.124 kernel/common source pin": "8769cc47188c3bdca2a34d39ba0f39a945b85465",
               "explicit source-build GKI setting": "--//build/kernel/kleaf:use_prebuilt_gki=false",
               "incorrect common-kernel override to generic GKI": "--//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build",
               "unsupported artifact_url_fmt workspace parameter": "artifact_url_fmt",
@@ -249,7 +258,7 @@ jobs:
           echo
           echo "Exact Shusky base-kernel and dist references:"
           sed -n '70,95p;180,235p' shusky-BUILD.bazel
-          PIXEL_COMMON_COMMIT="8769cc47188c3bdca2a34d39ba0f39a945b85465"
+          PIXEL_COMMON_COMMIT="fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462"
           curl --fail --location --silent --show-error \
             --retry 2 --retry-all-errors --connect-timeout 15 --max-time 90 \
             "https://android.googlesource.com/kernel/common/+/$PIXEL_COMMON_COMMIT/BUILD.bazel?format=TEXT" \
@@ -351,8 +360,13 @@ jobs:
         run: |
           set -euo pipefail
           cd workspace
-          git -C aosp cat-file -e 8769cc47188c3bdca2a34d39ba0f39a945b85465^{commit}
-          git -C aosp checkout --detach 8769cc47188c3bdca2a34d39ba0f39a945b85465
+          GKI_KERNEL_COMMON_COMMIT="fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462"
+          if ! git -C aosp cat-file -e "$GKI_KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
+            SOURCE_REMOTE="$(git -C aosp remote get-url origin)"
+            git -C aosp fetch --no-tags "$SOURCE_REMOTE" "$GKI_KERNEL_COMMON_COMMIT"
+          fi
+          git -C aosp checkout --detach "$GKI_KERNEL_COMMON_COMMIT"
+          test "$(git -C aosp rev-parse HEAD)" = "$GKI_KERNEL_COMMON_COMMIT"
           python3 <<'PY'
           from pathlib import Path
 
@@ -896,7 +910,8 @@ jobs:
             kernel-headers.tar.gz \
             system_dlkm_staging_archive.tar.gz \
             system_dlkm.modules.blocklist \
-            system_dlkm.modules.load
+            system_dlkm.modules.load \
+            vmlinux.symvers
           do
             url="https://ci.android.com/builds/submitted/14691759/kernel_aarch64/latest/raw/$artifact"
             status="$(curl --silent --show-error --location --range 0-0 \
