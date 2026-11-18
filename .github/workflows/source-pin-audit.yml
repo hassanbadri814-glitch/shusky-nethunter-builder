@@ -581,6 +581,27 @@ jobs:
           ]
           if fips_defconfig.read_text().splitlines() != expected_fragment:
               raise SystemExit("Native FIPS defconfig fragment content differs from the intended exact settings")
+          print("FIPS compiler and ARM64 module-PLT Kconfig definitions:")
+          for base in (Path("aosp"), Path("common")):
+              for path in base.rglob("Kconfig*"):
+                  if not path.is_file():
+                      continue
+                  try:
+                      lines = path.read_text(errors="replace").splitlines()
+                  except OSError:
+                      continue
+                  for i, line in enumerate(lines):
+                      if line.strip() in ("config ARM64_MODULE_PLTS", "config CC_IS_CLANG"):
+                          print(f"--- {path} ---")
+                          for j in range(i, min(len(lines), i + 12)):
+                              print(f"{j + 1}: {lines[j]}")
+          gki_defconfig = Path("aosp/arch/arm64/configs/gki_defconfig")
+          if gki_defconfig.is_file():
+              lines = gki_defconfig.read_text(errors="replace").splitlines()
+              print("GKI defconfig prerequisites:")
+              for number, line in enumerate(lines, 1):
+                  if line.startswith(("CONFIG_MODULES=", "CONFIG_ARM64_MODULE_PLTS=", "CONFIG_SCSI_UFS_CRYPTO=")):
+                      print(f"{number}: {line}")
           print("Native FIPS Kconfig definitions:")
           for item in kconfig_hits:
               print(f"{item[0]}:{item[1]}: {item[2]}")
