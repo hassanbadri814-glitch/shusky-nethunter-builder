@@ -409,7 +409,9 @@ jobs:
             "${BAZEL[@]}" query "$target" --output=label
           done
           echo "=== Confirm patched Shusky dependency graph contains all required prebuilt-aware aliases ==="
-          # `query` is unconfigured and traverses inactive select() branches, including the unavailable FIPS prebuilt.\n          # `cquery` resolves the actual configuration with the explicit Native FIPS flags, without building.\n          "${BAZEL[@]}" cquery "${QUERY_FLAGS[@]}" --output=label 'deps(//private/devices/google/shusky:zuma_shusky_dist)' > "$RUNNER_TEMP/shusky-deps.txt"
+          # `query` is unconfigured and traverses inactive select() branches, including the unavailable FIPS prebuilt.
+          # `cquery` resolves the actual configuration with the explicit Native FIPS flags, without building.
+          "${BAZEL[@]}" cquery "${QUERY_FLAGS[@]}" --output=label 'deps(//private/devices/google/shusky:zuma_shusky_dist)' > "$RUNNER_TEMP/shusky-deps.txt"
           for target in \
             //common:kernel_aarch64_download_or_build \
             //common:kernel_aarch64_images_download_or_build \
