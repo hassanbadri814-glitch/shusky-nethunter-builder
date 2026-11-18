@@ -175,7 +175,7 @@ jobs:
           fi
           echo "Resolved kernel/common remote: $SOURCE_REMOTE ($SOURCE_URL)"
           if ! git cat-file -e "$GKI_KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
-            git fetch --no-tags "$SOURCE_REMOTE" "$GKI_KERNEL_COMMON_COMMIT"
+            git fetch --depth=1 --no-tags "$SOURCE_REMOTE" "$GKI_KERNEL_COMMON_COMMIT"
           fi
           git checkout --detach "$GKI_KERNEL_COMMON_COMMIT"
           ACTUAL="$(git rev-parse HEAD)"
