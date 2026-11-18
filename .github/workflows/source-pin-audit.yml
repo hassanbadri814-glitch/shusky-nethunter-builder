@@ -394,7 +394,7 @@ jobs:
           workspace = Path("WORKSPACE")
           resolved = workspace.resolve()
           text = resolved.read_text()
-          matches = list(re.finditer(r"define_kleaf_workspace\\((.*?)\\)", text, re.S))
+          matches = list(re.finditer(r"define_kleaf_workspace\((.*?)\)", text, re.S))
           if len(matches) != 1:
               raise SystemExit(f"Expected one define_kleaf_workspace call in {resolved}; found {len(matches)}")
           if "artifact_url_fmt" not in matches[0].group(1):
@@ -402,7 +402,7 @@ jobs:
               separator = "" if not inner or inner.endswith(",") else ","
               replacement = (
                   "define_kleaf_workspace(" + inner + separator
-                  + '\\n    artifact_url_fmt = "https://ci.android.com/builds/submitted/{build_number}/{target}/latest/raw/{filename}",\\n'
+                  + '\n    artifact_url_fmt = "https://ci.android.com/builds/submitted/{build_number}/{target}/latest/raw/{filename}",\n'
                   + ")"
               )
               text = text[:matches[0].start()] + replacement + text[matches[0].end():]
