@@ -805,14 +805,29 @@ jobs:
               print("The exact source target rule and resulting embedded HMAC are verified independently.")
           PY
 
-          if ! find out -type f -path '*/crypto/fips140.ko' \
-            -not -path './build-report/*' -print -quit | grep -q .; then
-            echo "ERROR: no generated crypto/fips140.ko candidate exists under out/."
+          # Verify only authoritative final outputs. Bazel sandbox action trees
+          # also contain transient pre-strip/unstripped copies; comparing those
+          # byte-for-byte with the stripped final module creates false conflicts.
+          : > "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          test -f out/shusky/dist/fips140.ko && \
+            printf '%s\n' out/shusky/dist/fips140.ko \
+              >> "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          find out/bazel -type f \
+            \( -path '*/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel/crypto/fips140.ko' \
+               -o -path '*/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel_modules_install/staging/lib/modules/*/kernel/crypto/fips140.ko' \) \
+            -not -path '*/sandbox/*' -print \
+            >> "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          sort -u -o "$REPORT_DIR/fips-hmac-module-candidates.txt" \
+            "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          if ! grep -qx 'out/shusky/dist/fips140.ko' \
+            "$REPORT_DIR/fips-hmac-module-candidates.txt"; then
+            echo "ERROR: authoritative final dist fips140.ko is missing."
             exit 1
           fi
-          find out -type f -path '*/crypto/fips140.ko' \
-            -not -path './build-report/*' -print | sort \
-            > "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          if [ "$(wc -l < "$REPORT_DIR/fips-hmac-module-candidates.txt")" -lt 2 ]; then
+            echo "ERROR: expected final dist plus Bazel/staging FIPS module for cross-verification."
+            exit 1
+          fi
 
           python3 - "$REPORT_DIR" "$REPORT_DIR/fips-hmac-module-candidates.txt" <<'PY'
           import hashlib, hmac, struct, sys
@@ -910,6 +925,9 @@ jobs:
               return {
                   "path":str(path),"sha256":hashlib.sha256(blob).hexdigest(),
                   "hmac":calculated.hex(),"key_bytes":len(key),
+                  "key_sha256":hashlib.sha256(key).hexdigest(),
+                  "text_sha256":hashlib.sha256(textdata).hexdigest(),
+                  "rodata_sha256":hashlib.sha256(rodata).hexdigest(),
                   "text_bytes":len(textdata),"rodata_bytes":len(rodata),
                   "rela_text":byname[".init.rela.text"]["size"],
                   "rela_rodata":byname[".init.rela.rodata"]["size"],
@@ -922,8 +940,24 @@ jobs:
                   rejected.append(f"{p}: {e}")
           if not verified:
               raise SystemExit("ERROR: no module passed independent HMAC verification:\n"+"\n".join(rejected[:30]))
-          if len({x["sha256"] for x in verified}) != 1 or len({x["hmac"] for x in verified}) != 1:
-              raise SystemExit("ERROR: independently verified module candidates disagree")
+          # Final dist, canonical Bazel target and installed staging copy must
+          # be byte-identical, and each must independently pass embedded HMAC.
+          if len({x["sha256"] for x in verified}) != 1:
+              details = "\\n".join(
+                  f'{x["path"]}: sha256={x["sha256"]} hmac={x["hmac"]}'
+                  for x in verified
+              )
+              raise SystemExit(
+                  "ERROR: authoritative final FIPS module outputs are not byte-identical:\\n" + details
+              )
+          fingerprints = {
+              (x["hmac"], x["key_sha256"], x["text_sha256"], x["rodata_sha256"])
+              for x in verified
+          }
+          if len(fingerprints) != 1:
+              raise SystemExit(
+                  "ERROR: authoritative final FIPS outputs disagree in HMAC key or authenticated text/rodata"
+              )
           v = verified[0]
           lines = [
               "Kbuild target binding: PASS (pinned Makefile.postlink rule is scoped to crypto/fips140.ko)",
@@ -931,6 +965,9 @@ jobs:
               f"Verified module candidates: {len(verified)}",
               f"Module SHA-256: {v['sha256']}",
               f"Embedded HMAC-SHA256: {v['hmac']}",
+              f"HMAC key SHA-256: {v['key_sha256']}",
+              f"Authenticated .text SHA-256: {v['text_sha256']}",
+              f"Authenticated .rodata SHA-256: {v['rodata_sha256']}",
               f"HMAC key length: {v['key_bytes']} bytes",
               f"Covered .text bytes: {v['text_bytes']}",
               f"Covered .rodata bytes: {v['rodata_bytes']}",
