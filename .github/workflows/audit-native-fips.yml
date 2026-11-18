@@ -105,7 +105,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y cpio lz4 e2fsprogs file curl zstd binutils kmod
+          sudo apt-get install -y cpio lz4 e2fsprogs file curl zstd binutils binutils-aarch64-linux-gnu kmod
 
       - name: Audit final images, DLKM filesystems, and Native FIPS ramdisk
         env:
@@ -451,7 +451,7 @@ jobs:
           rows=[]
           for p in modules:
             with tempfile.NamedTemporaryFile(suffix='.ko') as out:
-              r=subprocess.run(['strip','--strip-debug','-o',out.name,str(p)],capture_output=True,text=True)
+              r=subprocess.run(['aarch64-linux-gnu-strip','--strip-debug','-o',out.name,str(p)],capture_output=True,text=True)
               if r.returncode:
                 rows.append((p, p.stat().st_size, None, r.stderr.strip()[:180]))
                 continue
