@@ -393,16 +393,85 @@ jobs:
               s = s.replace(anchor, anchor + f'\n    additional_kmi_symbol_lists = ["{abi_label}"],', 1)
           elif abi_label not in s:
               raise SystemExit("Existing additional_kmi_symbol_lists does not contain Native FIPS ABI")
+          if "nethunter_fips_defconfig" not in s:
+              anchor = '"shusky_defconfig"'
+              if s.count(anchor) != 1:
+                  raise SystemExit("Cannot uniquely locate Shusky defconfig fragment list")
+              s = s.replace(
+                  anchor,
+                  anchor + ',\\n        "nethunter_fips_defconfig"',
+                  1,
+              )
           if '"crypto/fips140.ko"' not in s:
               anchor = "module_outs = ZUMA_MODULE_OUTS,"
               if s.count(anchor) != 1:
                   raise SystemExit("Cannot uniquely locate Shusky module_outs declaration")
               s = s.replace(anchor, 'module_outs = ZUMA_MODULE_OUTS + ["crypto/fips140.ko"],', 1)
 
+          fips_defconfig = Path("private/devices/google/shusky/nethunter_fips_defconfig")
+          fips_defconfig.write_text(
+              "CONFIG_MODULES=y\\n"
+              "CONFIG_MODVERSIONS=y\\n"
+              "CONFIG_WLAN=y\\n"
+              "CONFIG_CFG80211=m\\n"
+              "CONFIG_MAC80211=m\\n"
+              "CONFIG_USB=y\\n"
+              "CONFIG_CRYPTO_FIPS140_MOD=m\\n"
+          )
+
+          zuma_ramdisk = Path("private/devices/google/zuma/vendor_ramdisk.modules.zuma")
+          shusky_ramdisk = Path("private/devices/google/shusky/vendor_ramdisk.modules.shusky")
+          fips_entry = "kernel/crypto/fips140.ko"
+          zuma_lines = zuma_ramdisk.read_text().splitlines()
+          if fips_entry not in zuma_lines:
+              zuma_lines.append(fips_entry)
+              zuma_ramdisk.write_text("\\n".join(zuma_lines) + "\\n")
+          shusky_lines = shusky_ramdisk.read_text().splitlines()
+          if fips_entry in shusky_lines:
+              raise SystemExit("FIPS module is unexpectedly assigned to the Shusky ramdisk list")
+          if zuma_lines.count(fips_entry) != 1:
+              raise SystemExit("FIPS module must occur exactly once in the Zuma ramdisk list")
+
+          kconfig_hits = []
+          makefile_hits = []
+          for base in (Path("aosp"), Path("common")):
+              for path in base.rglob("*"):
+                  if not path.is_file():
+                      continue
+                  if path.name.startswith("Kconfig"):
+                      try:
+                          lines = path.read_text(errors="replace").splitlines()
+                      except OSError:
+                          continue
+                      for number, line in enumerate(lines, 1):
+                          if "config CRYPTO_FIPS140_MOD" in line:
+                              kconfig_hits.append((path, number, line.strip()))
+                  if path.name in ("Makefile", "Kbuild"):
+                      try:
+                          lines = path.read_text(errors="replace").splitlines()
+                      except OSError:
+                          continue
+                      for number, line in enumerate(lines, 1):
+                          if "CRYPTO_FIPS140_MOD" in line:
+                              makefile_hits.append((path, number, line.strip()))
+          if not kconfig_hits:
+              raise SystemExit("Kconfig symbol CRYPTO_FIPS140_MOD was not found in the synced source tree")
+          if not makefile_hits:
+              raise SystemExit("No Makefile/Kbuild integration for CRYPTO_FIPS140_MOD was found")
+          print("Native FIPS Kconfig definitions:")
+          for item in kconfig_hits:
+              print(f"{item[0]}:{item[1]}: {item[2]}")
+          print("Native FIPS Makefile/Kbuild integration:")
+          for item in makefile_hits:
+              print(f"{item[0]}:{item[1]}: {item[2]}")
+          print("FIPS defconfig fragment:", fips_defconfig)
+          print("FIPS module in Zuma ramdisk list at line:", zuma_lines.index(fips_entry) + 1)
+          print("FIPS module occurrences in Zuma list:", zuma_lines.count(fips_entry))
+
           shusky.write_text(s)
           common.write_text(c)
           Path("fips-abi-label.txt").write_text(abi_label)
-          print("Exact proposed Shusky, Google-common and Native FIPS ABI edits applied.")
+          print("Exact proposed Shusky, Google-common, Native FIPS ABI, config and ramdisk edits applied.")
           PY
           python3 <<'PY'
           import os
