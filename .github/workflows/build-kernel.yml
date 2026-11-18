@@ -370,16 +370,34 @@ jobs:
           google_common.write_text(common_text)
           print("Google common BUILD: extracted_system_dlkm now uses prebuilt-aware GKI images.")
 
-          # Guard against accidentally retaining direct source-build GKI references.
-          for path, content in ((shusky, shusky_text), (google_common, common_text)):
-              for forbidden in (
-                  '"//common:kernel_aarch64"',
-                  '"//common:kernel_aarch64_images"',
-                  '"//common:kernel_aarch64_gki_boot_image"',
-                  '"//common:kernel_aarch64_headers"',
-              ):
-                  if forbidden in content:
-                      raise SystemExit(f"ERROR: unresolved direct GKI reference {forbidden} in {path}")
+          # Guard only the Shusky consumer BUILD file. The Google-common
+          # BUILD file defines the canonical source-build targets themselves,
+          # so finding those labels there is legitimate and must not fail this
+          # consumer-routing check. Require exact quoted labels, not prefixes.
+          import re
+          forbidden_labels = (
+              "//common:kernel_aarch64",
+              "//common:kernel_aarch64_images",
+              "//common:kernel_aarch64_gki_boot_image",
+              "//common:kernel_aarch64_headers",
+          )
+          for label in forbidden_labels:
+              if re.search(r'(?<![A-Za-z0-9_])"' + re.escape(label) + r'"', shusky_text):
+                  raise SystemExit(
+                      f"ERROR: unresolved exact direct GKI reference {label} in {shusky}"
+                  )
+          expected_labels = (
+              "//common:kernel_aarch64_download_or_build",
+              "//common:kernel_aarch64_images_download_or_build",
+              "//common:kernel_aarch64_gki_artifacts_download_or_build",
+              "//common:kernel_aarch64_headers_download_or_build",
+          )
+          for label in expected_labels:
+              if f'"{label}"' not in shusky_text:
+                  raise SystemExit(
+                      f"ERROR: expected prebuilt-aware GKI reference missing: {label}"
+                  )
+          print("PASS: Shusky uses exact prebuilt-aware GKI consumer labels.")
           PY
           echo "=== Confirm Native FIPS kernel label flag exists ==="
           grep -n -A5 -B2 'name = "kernel"' private/devices/google/common/BUILD.bazel
