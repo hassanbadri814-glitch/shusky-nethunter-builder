@@ -148,93 +148,26 @@ jobs:
             exit 1
           fi
 
-      - name: Pin kernel/common to the installed Pixel kernel commit
+      - name: Pin Pixel device kernel/common source revision
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$REPORT_DIR"
           cd "$WORKSPACE/aosp"
-          KERNEL_COMMON_COMMIT="164ae0b804dd"
-          KERNEL_COMMON_BRANCH="android-gs-shusky-6.1-android16"
-          KERNEL_COMMON_REMOTE="https://android.googlesource.com/kernel/common"
-          echo "Requested stock kernel commit: $KERNEL_COMMON_COMMIT"
-          echo "Search branch: $KERNEL_COMMON_BRANCH"
-
-          # Avoid large --deepen requests: Google Gerrit returned HTTP 500
-          # for every 1000-commit history expansion. Try protocol v2 and
-          # progressively wider date-bounded shallow fetches instead.
-          git_fetch_retry() {
-            local label="$1"
-            shift
-            local attempt
-            for attempt in $(seq 1 3); do
-              echo "${label}: protocol v2 / HTTP2 attempt ${attempt}/3..."
-              if git -c protocol.version=2 -c http.version=HTTP/2 \
-                fetch --no-tags "$@"; then
-                return 0
-              fi
-              echo "${label}: retrying with HTTP/1.1..."
-              if git -c protocol.version=2 -c http.version=HTTP/1.1 \
-                fetch --no-tags "$@"; then
-                return 0
-              fi
-              if [ "$attempt" -lt 3 ]; then
-                local wait=$((attempt * 15))
-                echo "Fetch failed; retrying in ${wait}s."
-                sleep "$wait"
-              fi
-            done
-            echo "ERROR: ${label} failed after protocol/transport retries."
-            return 1
-          }
-
-          git_fetch_retry "Initial kernel/common branch fetch" \
-            "$KERNEL_COMMON_REMOTE" "refs/heads/$KERNEL_COMMON_BRANCH"
-
-          if ! git cat-file -e "$KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
-            FOUND=0
-            # The installed Pixel build is from 2026-05. Start with the
-            # smallest useful history window, then widen only if necessary.
-            for SINCE in 2026-05-01 2026-04-01 2026-01-01 2025-01-01; do
-              echo "Fetching kernel/common history since $SINCE..."
-              git_fetch_retry "History fetch since $SINCE" \
-                --shallow-since="$SINCE" "$KERNEL_COMMON_REMOTE" \
-                "refs/heads/$KERNEL_COMMON_BRANCH"
-              if git cat-file -e "$KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
-                FOUND=1
-                echo "Exact installed Pixel commit found with since=$SINCE."
-                break
-              fi
-              echo "Target commit not present yet; widening history."
-            done
-            if [ "$FOUND" -ne 1 ]; then
-              echo "ERROR: installed Pixel commit is not reachable in tested date windows."
-              echo "Requested: $KERNEL_COMMON_COMMIT"
-              echo "Branch: $KERNEL_COMMON_BRANCH"
-              echo "Fetched refs:"
-              git log -1 --format='%H %cI %s' FETCH_HEAD || true
-              exit 1
-            fi
+          DEVICE_COMMON_COMMIT="8769cc47188c3bdca2a34d39ba0f39a945b85465"
+          if ! git cat-file -e "$DEVICE_COMMON_COMMIT^{commit}" 2>/dev/null; then
+            echo "ERROR: Pixel device-source commit is absent from the synced manifest checkout."
+            echo "Expected: $DEVICE_COMMON_COMMIT"
+            git log -1 --format='%H %cI %s'
+            exit 1
           fi
-
-          ACTUAL_COMMIT="$(git rev-parse "$KERNEL_COMMON_COMMIT^{commit}")"
-          case "$ACTUAL_COMMIT" in
-            "$KERNEL_COMMON_COMMIT"*) ;;
-            *)
-              echo "ERROR: resolved commit does not match installed Pixel kernel."
-              echo "Actual: $ACTUAL_COMMIT"
-              exit 1
-              ;;
-          esac
-          git checkout --detach "$ACTUAL_COMMIT"
-          echo "Pinned kernel/common commit: $ACTUAL_COMMIT"
-          echo "KERNEL_COMMON_COMMIT=$ACTUAL_COMMIT" >> "$GITHUB_ENV"
-          git log -1 --format=fuller
+          git checkout --detach "$DEVICE_COMMON_COMMIT"
+          ACTUAL="$(git rev-parse HEAD)"
+          test "$ACTUAL" = "$DEVICE_COMMON_COMMIT"
+          echo "Pixel device kernel/common commit: $ACTUAL"
+          echo "KERNEL_COMMON_COMMIT=$ACTUAL" >> "$GITHUB_ENV"
           {
-            echo "Requested commit: $KERNEL_COMMON_COMMIT"
-            echo "Resolved commit: $ACTUAL_COMMIT"
-            echo "Source branch: $KERNEL_COMMON_BRANCH"
-            echo "Fetch strategy: protocol v2; HTTP/2 then HTTP/1.1; shallow-since windows"
+            echo "Pixel device-source commit: $ACTUAL"
+            echo "Installed GKI base is supplied separately by build ID 14691759."
           } | tee "$REPORT_DIR/kernel-common-commit.txt"
 
       # Persist Bazel's action cache between runs. The Repo cache above
@@ -395,6 +328,62 @@ jobs:
           echo "=== Shusky ramdisk module list ==="
           sed -n '1,100p' "$SHUSKY_RAMDISK"
 
+      - name: Route Shusky and Native FIPS dependencies through exact GKI prebuilt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          python3 <<'PY'
+          from pathlib import Path
+
+          shusky = Path("private/devices/google/shusky/BUILD.bazel")
+          google_common = Path("private/devices/google/common/BUILD.bazel")
+          shusky_text = shusky.read_text()
+          common_text = google_common.read_text()
+
+          replacements = {
+              '"//common:kernel_aarch64"':
+                  '"//common:kernel_aarch64_download_or_build"',
+              '"//common:kernel_aarch64_images"':
+                  '"//common:kernel_aarch64_images_download_or_build"',
+              '"//common:kernel_aarch64_gki_boot_image"':
+                  '"//common:kernel_aarch64_gki_artifacts_download_or_build"',
+              '"//common:kernel_aarch64_headers"':
+                  '"//common:kernel_aarch64_headers_download_or_build"',
+          }
+          for old, new in replacements.items():
+              count = shusky_text.count(old)
+              if count == 0:
+                  raise SystemExit(f"ERROR: expected Shusky GKI reference missing: {old}")
+              shusky_text = shusky_text.replace(old, new)
+              print(f"Shusky BUILD: {old} -> {new} ({count} occurrence(s))")
+
+          old_images = 'images = "//common:kernel_aarch64_images"'
+          new_images = 'images = "//common:kernel_aarch64_images_download_or_build"'
+          if common_text.count(old_images) != 1:
+              raise SystemExit(
+                  "ERROR: expected exactly one Google-common extracted_system_dlkm images reference"
+              )
+          common_text = common_text.replace(old_images, new_images, 1)
+          shusky.write_text(shusky_text)
+          google_common.write_text(common_text)
+          print("Google common BUILD: extracted_system_dlkm now uses prebuilt-aware GKI images.")
+
+          # Guard against accidentally retaining direct source-build GKI references.
+          for path, content in ((shusky, shusky_text), (google_common, common_text)):
+              for forbidden in (
+                  '"//common:kernel_aarch64"',
+                  '"//common:kernel_aarch64_images"',
+                  '"//common:kernel_aarch64_gki_boot_image"',
+                  '"//common:kernel_aarch64_headers"',
+              ):
+                  if forbidden in content:
+                      raise SystemExit(f"ERROR: unresolved direct GKI reference {forbidden} in {path}")
+          PY
+          echo "=== Confirm Native FIPS kernel label flag exists ==="
+          grep -n -A5 -B2 'name = "kernel"' private/devices/google/common/BUILD.bazel
+          echo "GKI prebuilt target routing patch: PASS"
+
       - name: Create native FIPS defconfig fragment
         shell: bash
         run: |
@@ -519,6 +508,14 @@ jobs:
           bazel query \
             '//private/devices/google/shusky:zuma_shusky_dist' \
             --output=label
+          for TARGET in \
+            //common:kernel_aarch64_download_or_build \
+            //common:kernel_aarch64_images_download_or_build \
+            //common:kernel_aarch64_gki_artifacts_download_or_build \
+            //common:kernel_aarch64_headers_download_or_build
+          do
+            bazel query "$TARGET" --output=label
+          done
           grep -n \
             'abi_gki_aarch64_pixel' \
             private/devices/google/shusky/BUILD.bazel
@@ -538,7 +535,8 @@ jobs:
           cd "$WORKSPACE"
           ./private/devices/google/shusky/build_shusky.sh \
             --kernel_package=@//aosp \
-            --//build/kernel/kleaf:use_prebuilt_gki=false \
+            --use_prebuilt_gki=14691759 \
+            --//private/devices/google/common:kernel=//common:kernel_aarch64_download_or_build \
             --no//private/devices/google/common:download_prebuilt_gki_fips140 \
             --verbose_failures \
             --sandbox_debug \
