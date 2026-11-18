@@ -1,4 +1,5 @@
 name: Build Pixel 8 Shiba - NetHunter Native FIPS Test
+# build-authorized: user-approved Native FIPS kernel build; no device flashing is performed.
 
 on:
   workflow_dispatch:
