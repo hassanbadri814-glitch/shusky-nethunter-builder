@@ -58,6 +58,7 @@ jobs:
             curl \
             flex \
             git \
+            kmod \
             libelf-dev \
             libncurses-dev \
             libssl-dev \
@@ -148,26 +149,37 @@ jobs:
             exit 1
           fi
 
-      - name: Pin Pixel device kernel/common source revision
+      - name: Pin exact Google GKI kernel/common source revision
         shell: bash
         run: |
           set -euo pipefail
           cd "$WORKSPACE/aosp"
-          DEVICE_COMMON_COMMIT="8769cc47188c3bdca2a34d39ba0f39a945b85465"
-          if ! git cat-file -e "$DEVICE_COMMON_COMMIT^{commit}" 2>/dev/null; then
-            echo "ERROR: Pixel device-source commit is absent from the synced manifest checkout."
-            echo "Expected: $DEVICE_COMMON_COMMIT"
-            git log -1 --format='%H %cI %s'
-            exit 1
+          GKI_KERNEL_COMMON_COMMIT="fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462"
+          GKI_KERNEL_RELEASE="6.1.145-android14-11-gfa1d6308d1fe"
+          SOURCE_REMOTE="$(git remote get-url origin)"
+          case "$SOURCE_REMOTE" in
+            *android.googlesource.com/kernel/common*) ;;
+            *)
+              echo "ERROR: unexpected kernel/common remote: $SOURCE_REMOTE"
+              exit 1
+              ;;
+          esac
+          if ! git cat-file -e "$GKI_KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
+            git fetch --no-tags "$SOURCE_REMOTE" "$GKI_KERNEL_COMMON_COMMIT"
           fi
-          git checkout --detach "$DEVICE_COMMON_COMMIT"
+          git checkout --detach "$GKI_KERNEL_COMMON_COMMIT"
           ACTUAL="$(git rev-parse HEAD)"
-          test "$ACTUAL" = "$DEVICE_COMMON_COMMIT"
-          echo "Pixel device kernel/common commit: $ACTUAL"
+          test "$ACTUAL" = "$GKI_KERNEL_COMMON_COMMIT"
+          grep -qx 'VERSION = 6' Makefile
+          grep -qx 'PATCHLEVEL = 1' Makefile
+          grep -qx 'SUBLEVEL = 145' Makefile
           echo "KERNEL_COMMON_COMMIT=$ACTUAL" >> "$GITHUB_ENV"
+          echo "EXPECTED_KERNEL_RELEASE=$GKI_KERNEL_RELEASE" >> "$GITHUB_ENV"
           {
-            echo "Pixel device-source commit: $ACTUAL"
-            echo "Installed GKI base is supplied separately by build ID 14691759."
+            echo "Exact Google kernel/common commit: $ACTUAL"
+            echo "Source kernel release: $GKI_KERNEL_RELEASE"
+            echo "Matching GKI build ID: 14691759"
+            echo "The kernel source and GKI prebuilt now use the same 6.1.145 base."
           } | tee "$REPORT_DIR/kernel-common-commit.txt"
 
       # Persist Bazel's action cache between runs. The Repo cache above
@@ -613,6 +625,132 @@ jobs:
             --disk_cache="$WORKSPACE/.bazel-disk-cache" \
             //private/devices/google/shusky:zuma_shusky_dist \
             2>&1 | tee "$REPORT_DIR/build.log"
+
+      - name: Verify exact GKI module release and Native FIPS symbol CRCs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          EXPECTED="$EXPECTED_KERNEL_RELEASE"
+
+          if grep -Fq "KMI or sublevel mismatch before running make modules_install" "$REPORT_DIR/build.log"; then
+            echo "ERROR: Kleaf reported a kernel/KMI sublevel mismatch."
+            exit 1
+          fi
+
+          mapfile -t MODULES < <(
+            find out/bazel -type f \
+              -path '*/private/devices/google/shusky/kernel_images_*/staging/lib/modules/*/*.ko' \
+              -print | sort -u
+          )
+          if [ "${#MODULES[@]}" -lt 200 ]; then
+            echo "ERROR: expected the complete Shusky module set; found ${#MODULES[@]} modules."
+            exit 1
+          fi
+
+          BAD=0
+          for module in "${MODULES[@]}"; do
+            release="$(modinfo -F vermagic "$module" | awk '{print $1}')"
+            release="${release%-ab*}"
+            if [ "$release" != "$EXPECTED" ]; then
+              echo "RELEASE_MISMATCH $module :: $release"
+              BAD=1
+            fi
+          done
+          if [ "$BAD" -ne 0 ]; then
+            echo "ERROR: one or more packaged modules were not built for $EXPECTED."
+            exit 1
+          fi
+
+          FIPS_MODULE="$(find out/bazel -type f \
+            -path '*/kernel_images_initramfs/staging/lib/modules/*/kernel/crypto/fips140.ko' \
+            -print -quit)"
+          GKI_MODULE="$(find out/bazel -type f \
+            -path '*/kernel_images_initramfs/staging/lib/modules/*/kernel/mm/zsmalloc.ko' \
+            -print -quit)"
+          MODULES_LOAD="$(find out/bazel -type f \
+            -path '*/kernel_images_initramfs/modules.load' -print -quit)"
+          MODULES_DEP="$(find out/bazel -type f \
+            -path '*/kernel_images_initramfs/staging/lib/modules/*/modules.dep' -print -quit)"
+          test -n "$FIPS_MODULE"
+          test -n "$GKI_MODULE"
+          test -n "$MODULES_LOAD"
+          test -n "$MODULES_DEP"
+          grep -Fq 'kernel/crypto/fips140.ko' "$MODULES_LOAD"
+          grep -Fq 'ufs-pixel-fips140.ko' "$MODULES_LOAD"
+          grep -Fq 'ufs-exynos-gs.ko' "$MODULES_LOAD"
+          grep -Fq 'kernel/crypto/fips140.ko:' "$MODULES_DEP"
+          grep -E 'ufs-exynos-gs\.ko:.*ufs-pixel-fips140\.ko' "$MODULES_DEP"
+
+          FIPS_LAYOUT_CRC="$(modprobe --show-modversions "$FIPS_MODULE" | awk '$2 == "module_layout" {print $1}')"
+          GKI_LAYOUT_CRC="$(modprobe --show-modversions "$GKI_MODULE" | awk '$2 == "module_layout" {print $1}')"
+          test -n "$FIPS_LAYOUT_CRC"
+          test "$FIPS_LAYOUT_CRC" = "$GKI_LAYOUT_CRC"
+
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://ci.android.com/builds/submitted/14691759/kernel_aarch64/latest/raw/vmlinux.symvers" \
+            -o "$REPORT_DIR/gki-vmlinux.symvers"
+          test -s "$REPORT_DIR/gki-vmlinux.symvers"
+
+          python3 - "$FIPS_MODULE" "$REPORT_DIR/gki-vmlinux.symvers" "$REPORT_DIR/fips-gki-crc-audit.txt" <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          module, symvers_path, report_path = sys.argv[1:]
+          def norm(value):
+              value = value.lower()
+              return value[2:] if value.startswith("0x") else value
+
+          kernel_symbols = {}
+          with open(symvers_path, encoding="utf-8", errors="replace") as handle:
+              for line in handle:
+                  fields = line.split()
+                  if len(fields) >= 2 and re.fullmatch(r"(?:0x)?[0-9a-fA-F]{8}", fields[0]):
+                      kernel_symbols[fields[1]] = norm(fields[0])
+
+          output = subprocess.check_output(
+              ["modprobe", "--show-modversions", module], text=True
+          )
+          imports = []
+          for line in output.splitlines():
+              fields = line.split()
+              if len(fields) >= 2 and fields[0].startswith("0x"):
+                  imports.append((fields[1], norm(fields[0])))
+
+          missing = []
+          mismatches = []
+          for symbol, expected_crc in imports:
+              actual_crc = kernel_symbols.get(symbol)
+              if actual_crc is None:
+                  missing.append(symbol)
+              elif actual_crc != expected_crc:
+                  mismatches.append((symbol, expected_crc, actual_crc))
+
+          with open(report_path, "w", encoding="utf-8") as report:
+              report.write(f"FIPS module: {module}\n")
+              report.write(f"GKI vmlinux.symvers symbols: {len(kernel_symbols)}\n")
+              report.write(f"FIPS imported symbols checked: {len(imports)}\n")
+              report.write(f"Missing GKI symbols: {len(missing)}\n")
+              report.write(f"CRC mismatches: {len(mismatches)}\n")
+              for symbol in missing:
+                  report.write(f"MISSING {symbol}\n")
+              for symbol, expected, actual in mismatches:
+                  report.write(f"CRC_MISMATCH {symbol} module={expected} GKI={actual}\n")
+
+          if not imports or missing or mismatches:
+              sys.exit(1)
+          PY
+
+          {
+            echo "Expected kernel release: $EXPECTED"
+            echo "Exact kernel/common commit: $KERNEL_COMMON_COMMIT"
+            echo "Modules scanned across final initramfs/DLKM staging trees: ${#MODULES[@]}"
+            echo "All module vermagic release prefixes match the exact GKI base."
+            echo "FIPS module_layout CRC matches the GKI zsmalloc module."
+            echo "FIPS imported-symbol CRCs match GKI build 14691759 vmlinux.symvers."
+            echo "FIPS, UFS FIPS, UFS driver, and modules.dep dependency entries verified."
+          } | tee "$REPORT_DIR/kernel-module-compatibility.txt"
 
       - name: Preserve generated vendor_kernel_boot image
         if: success()
