@@ -456,6 +456,67 @@ jobs:
           print("The repository's committed kernel sources and production workflow remain unchanged.")
           print("The next step is a read-only Bazel cquery; no build or image target is invoked.")
           PY
+          python3 <<'PY'
+          import subprocess
+          from pathlib import Path
+
+          root = Path(".")
+          print("\n=== Diagnose the newly exposed bcm4398 dependency-analysis error ===")
+          for relative in (
+              "private/google-modules/wlan/bcm4398/BUILD.bazel",
+              "private/google-modules/soc/gs/BUILD.bazel",
+              "private/devices/google/shusky/BUILD.bazel",
+              "private/devices/google/common/BUILD.bazel",
+          ):
+              path = root / relative
+              print(f"\n--- {relative} ---")
+              if path.is_file():
+                  print(path.read_text())
+              else:
+                  print("NOT PRESENT")
+
+          print("\n=== All exact gs_undefined and bcm4398 references in Google module BUILD/Starlark files ===")
+          for base in (root / "private/google-modules", root / "private/devices/google"):
+              for path in sorted(base.rglob("*")):
+                  if not path.is_file() or not (
+                      path.name.startswith("BUILD") or path.suffix == ".bzl"
+                  ):
+                      continue
+                  try:
+                      lines = path.read_text(errors="replace").splitlines()
+                  except OSError:
+                      continue
+                  hits = [
+                      (i, line) for i, line in enumerate(lines)
+                      if "gs_undefined" in line or "bcmdhd4398" in line
+                  ]
+                  if hits:
+                      print(f"\n--- {path} ---")
+                      for i, line in hits:
+                          print(f"{i + 1}: {line}")
+
+          print("\n=== Git revisions for the exact failing source directories ===")
+          for directory in (
+              "private/google-modules/wlan",
+              "private/google-modules/soc",
+              "private/devices/google/shusky",
+              "private/devices/google/common",
+          ):
+              p = subprocess.run(
+                  ["git", "-C", directory, "rev-parse", "--show-toplevel"],
+                  text=True, capture_output=True,
+              )
+              if p.returncode == 0:
+                  top = p.stdout.strip()
+                  sha = subprocess.check_output(
+                      ["git", "-C", top, "rev-parse", "HEAD"], text=True
+                  ).strip()
+                  print(f"{directory}: {top} @ {sha}")
+              else:
+                  print(f"{directory}: no Git project root found")
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write("SKIP_BAZEL_QUERY=1\n")
+          PY
 
       - name: Probe public Android CI artifacts for the exact installed GKI build (read only)
         shell: bash
@@ -476,6 +537,7 @@ jobs:
           done
 
       - name: Run read-only Bazel target and dependency queries (no build)
+        if: env.SKIP_BAZEL_QUERY != '1'
         shell: bash
         run: |
           set -euo pipefail
