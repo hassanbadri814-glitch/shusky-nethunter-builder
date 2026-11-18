@@ -1,5 +1,5 @@
 name: Independent Shiba Native FIPS Artifact Audit
-# audit-target-44225209656: final strict verification pass
+# audit-target-44225209656: final verified audit after removing legacy static audit route
 # audit-target-44225209656: trigger one-time audit of the already completed build
 on:
   workflow_run:
