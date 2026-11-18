@@ -179,5 +179,62 @@ jobs:
           echo "Kleaf GKI boot-image target declarations:"
           grep -n -C 4 -E 'gki_boot_image|boot_img_archive|gki_artifacts' pixel-kleaf-common-kernels.bzl | head -180
 
+          echo
+          echo "=== 6. Inspect the exact Kleaf prebuilt configuration and GKI artifact implementation ==="
+          KLEAF_COMMIT="6483b5a6b74251440b266536c2dbc902a4fa3cf2"
+          for SPEC in \
+            "kleaf/constants.bzl:kleaf-constants" \
+            "kleaf/impl/gki_artifacts.bzl:kleaf-gki-artifacts"; do
+            FILE="${SPEC%%:*}"
+            OUT="${SPEC##*:}"
+            curl --fail --location --silent --show-error \
+              --retry 2 --retry-all-errors --connect-timeout 15 --max-time 90 \
+              "https://android.googlesource.com/kernel/build/+/$KLEAF_COMMIT/$FILE?format=TEXT" \
+              -o "$OUT.b64"
+            base64 -d "$OUT.b64" > "$OUT"
+          done
+          echo "--- GKI_DOWNLOAD_CONFIGS definition ---"
+          grep -n -A100 -B8 'GKI_DOWNLOAD_CONFIGS' kleaf-constants | head -150
+          echo
+          echo "--- GKI artifact prebuilt/download rule implementation ---"
+          grep -n -A12 -B8 -E 'gki_artifacts_prebuilts|use_prebuilt_gki|artifact|boot' kleaf-gki-artifacts | head -240
+          echo
+          echo "=== 7. Resolve device-common project pin and inspect Native FIPS targets ==="
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("pixel-default.xml").getroot()
+          default = root.find("default")
+          for p in root.findall("project"):
+              name = p.get("name", "")
+              path = p.get("path", "")
+              if "devices/google/common" in name or "devices/google/common" in path:
+                  rev = p.get("revision") or (default.get("revision") if default is not None else "")
+                  print(f"DEVICE_COMMON_PROJECT={name} PATH={path} REVISION={rev}")
+          PY
+          DEVICE_COMMON_COMMIT="$(python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("pixel-default.xml").getroot()
+          default = root.find("default")
+          matches = []
+          for p in root.findall("project"):
+              if "devices/google/common" in p.get("name", "") or "devices/google/common" in p.get("path", ""):
+                  matches.append(p.get("revision") or (default.get("revision") if default is not None else ""))
+          if len(matches) != 1 or not matches[0]:
+              raise SystemExit("Cannot uniquely resolve devices/google/common manifest pin")
+          print(matches[0])
+          PY
+          )"
+          curl --fail --location --silent --show-error \
+            --retry 2 --retry-all-errors --connect-timeout 15 --max-time 90 \
+            "https://android.googlesource.com/kernel/devices/google/common/+/$DEVICE_COMMON_COMMIT/BUILD.bazel?format=TEXT" \
+            -o device-common-BUILD.bazel.b64
+          base64 -d device-common-BUILD.bazel.b64 > device-common-BUILD.bazel
+          echo "--- Native FIPS rule and dependency references ---"
+          grep -n -A18 -B12 -E 'fips140|FIPS|kernel_gki_modules|download_prebuilt_gki_fips140|base_kernel' device-common-BUILD.bazel | head -260
+          echo
+          echo "=== 8. Check all Shusky dist GKI references against the generated artifact targets ==="
+          grep -n -A8 -B8 -E 'kernel_aarch64_(gki_boot_image|gki_artifacts|headers|images|download_or_build)' shusky-BUILD.bazel pixel-common-BUILD.bazel kleaf-constants kleaf-gki-artifacts | head -220
+          echo "Source dependency inspection complete; no build or image generation was invoked."
+
           echo "RESULT: GKI manifest kernel/common pin matches the exact full SHA in the device uname."
           echo "No compilation, image generation, flashing, or phone changes were performed."
