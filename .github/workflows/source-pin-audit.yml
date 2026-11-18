@@ -459,6 +459,61 @@ jobs:
                       for number, line in hits:
                           print(f"{number}: {line}")
 
+          print("UFS FIPS Kconfig and Kbuild:")
+          for relative in (
+              "private/google-modules/soc/gs/drivers/ufs/Kconfig",
+              "private/google-modules/soc/gs/drivers/ufs/Kbuild",
+              "private/google-modules/soc/gs/drivers/ufs/Makefile",
+              "aosp/crypto/Kconfig",
+              "aosp/crypto/Makefile",
+          ):
+              path = Path(relative)
+              if path.is_file():
+                  print(f"--- {relative} ---")
+                  lines = path.read_text(errors="replace").splitlines()
+                  if "ufs" in relative:
+                      print("\\n".join(f"{i + 1}: {line}" for i, line in enumerate(lines)))
+                  else:
+                      hits = [i for i, line in enumerate(lines) if "CRYPTO_FIPS140_MOD" in line]
+                      emitted = set()
+                      for i in hits:
+                          for j in range(max(0, i - 4), min(len(lines), i + 7)):
+                              if j not in emitted:
+                                  print(f"{j + 1}: {lines[j]}")
+                                  emitted.add(j)
+
+          print("Vendor ramdisk module-list consumers:")
+          scan_roots = (
+              Path("private/devices/google"),
+              Path("private/google-modules"),
+              Path("build/kernel/kleaf"),
+          )
+          for base in scan_roots:
+              for path in sorted(base.rglob("*")):
+                  if not path.is_file() or not (
+                      path.name.startswith("BUILD") or path.suffix in (".bzl", ".py", ".sh")
+                  ):
+                      continue
+                  try:
+                      lines = path.read_text(errors="replace").splitlines()
+                  except OSError:
+                      continue
+                  hits = [
+                      (number, line.strip()) for number, line in enumerate(lines, 1)
+                      if "vendor_ramdisk.modules" in line or "modules.load" in line or "modules.dep" in line
+                  ]
+                  if hits:
+                      print(f"--- {path} ---")
+                      for number, line in hits[:80]:
+                          print(f"{number}: {line}")
+
+          ufs_fips = Path("private/google-modules/soc/gs/drivers/ufs/ufs-pixel-fips.c")
+          if ufs_fips.is_file():
+              print("UFS FIPS module references and registration:")
+              for number, line in enumerate(ufs_fips.read_text(errors="replace").splitlines(), 1):
+                  if any(token in line.lower() for token in ("module_", "extern ", "symbol", "fips140", "crypto_alloc", "request_module", "init", "exit")):
+                      print(f"{number}: {line.strip()}")
+
           kconfig_hits = []
           makefile_hits = []
           for base in (Path("aosp"), Path("common")):
