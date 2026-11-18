@@ -409,6 +409,33 @@ jobs:
           print('\n'.join(output))
           PY
 
+      - name: Diagnose DLKM filesystem minimum size and module storage breakdown
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIST="artifact/build-report/package/out/shusky/dist"
+          {
+            echo "DLKM filesystem geometry and minimum-size diagnostics"
+            for image in "$DIST/system_dlkm.img" "$DIST/vendor_dlkm.img"; do
+              echo
+              echo "=== $image ==="
+              stat -c 'image_bytes=%s' "$image"
+              dumpe2fs -h "$image" 2>/dev/null | grep -E '^(Block count|Block size|Free blocks|Reserved block count|Filesystem features|Filesystem state):'
+              resize2fs -P "$image" 2>&1
+            done
+            echo
+            echo "=== Per-filesystem module counts and byte totals ==="
+            python3 - <<'PY'
+          from pathlib import Path
+          for label,root in [('system_dlkm',Path('system-dlkm-root')),('vendor_dlkm',Path('vendor-dlkm-root'))]:
+            files=list(root.rglob('*.ko'))
+            print(f'{label}: modules={len(files)} module_bytes={sum(p.stat().st_size for p in files)}')
+            for p in sorted(files,key=lambda p:p.stat().st_size,reverse=True)[:25]:
+              print(f'  {p.stat().st_size:>10} {p.relative_to(root)}')
+          PY
+          } | tee audit-report/dlkm-size-diagnostics.txt
+
       - name: Independently verify every flash image fits the exact stock partition
         if: success()
         shell: bash
