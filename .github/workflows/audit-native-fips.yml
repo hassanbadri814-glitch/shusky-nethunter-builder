@@ -297,8 +297,8 @@ jobs:
         shell: bash
         run: |
           {
-            echo "Source run: \${{ steps.source.outputs.SOURCE_RUN_ID }}"
-            echo "Source commit: \${{ steps.source.outputs.SOURCE_SHA }}"
+            echo "Source run: ${{ steps.source.outputs.SOURCE_RUN_ID }}"
+            echo "Source commit: ${{ steps.source.outputs.SOURCE_SHA }}"
             echo "Independent artifact audit: PASS"
             echo "Final images, DLKM filesystems, Native FIPS HMAC, and vendor ramdisk: PASS"
           } | tee audit-report/AUDIT-PASS.txt
