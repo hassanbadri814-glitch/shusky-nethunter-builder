@@ -380,7 +380,7 @@ jobs:
           fi
           echo "Resolved kernel/common remote: $SOURCE_REMOTE ($SOURCE_URL)"
           if ! git -C aosp cat-file -e "$GKI_KERNEL_COMMON_COMMIT^{commit}" 2>/dev/null; then
-            git -C aosp fetch --no-tags "$SOURCE_REMOTE" "$GKI_KERNEL_COMMON_COMMIT"
+            git -C aosp fetch --depth=1 --no-tags "$SOURCE_REMOTE" "$GKI_KERNEL_COMMON_COMMIT"
           fi
           git -C aosp checkout --detach "$GKI_KERNEL_COMMON_COMMIT"
           test "$(git -C aosp rev-parse HEAD)" = "$GKI_KERNEL_COMMON_COMMIT"
