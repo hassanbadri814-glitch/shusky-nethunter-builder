@@ -436,6 +436,35 @@ jobs:
           PY
           } | tee audit-report/dlkm-size-diagnostics.txt
 
+      - name: Measure safe debug-section stripping savings in DLKM modules
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess,tempfile
+          roots=[Path('system-dlkm-root'),Path('vendor-dlkm-root')]
+          modules=[p for root in roots for p in root.rglob('*.ko')]
+          before=sum(p.stat().st_size for p in modules)
+          after=0
+          rows=[]
+          for p in modules:
+            with tempfile.NamedTemporaryFile(suffix='.ko') as out:
+              r=subprocess.run(['strip','--strip-debug','-o',out.name,str(p)],capture_output=True,text=True)
+              if r.returncode:
+                rows.append((p, p.stat().st_size, None, r.stderr.strip()[:180]))
+                continue
+              size=Path(out.name).stat().st_size
+              after+=size
+              rows.append((p,p.stat().st_size,size,''))
+          print(f'modules={len(modules)} original_bytes={before} stripped_debug_bytes={after} potential_savings={before-after}')
+          for p,old,new,error in sorted(rows,key=lambda x:x[1],reverse=True)[:60]:
+            print(f'{p}: original={old} stripped={new} savings={(old-new) if new is not None else "ERROR"} {error}')
+          failed=[str(p) for p,old,new,error in rows if new is None]
+          if failed: print('STRIP_DIAGNOSTIC_ERRORS:',failed[:10])
+          PY
+
       - name: Independently verify every flash image fits the exact stock partition
         if: success()
         shell: bash
