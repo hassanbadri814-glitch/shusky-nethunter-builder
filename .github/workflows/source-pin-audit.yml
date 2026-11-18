@@ -44,7 +44,7 @@ jobs:
               "verified public Android CI artifact endpoint":
                   "https://ci.android.com/builds/submitted/{build_number}/{target}/latest/raw/{filename}",
               "Kleaf artifact URL patch":
-                  "build/kernel/kleaf/download_repo.bzl",
+                  "kleaf/download_repo.bzl",
               "build uses Kleaf Bazel wrapper":
                   "tools/bazel run",
               "native FIPS compilation (not prebuilt module)":
