@@ -424,8 +424,10 @@ jobs:
           fips_entry = "kernel/crypto/fips140.ko"
           zuma_lines = zuma_ramdisk.read_text().splitlines()
           if fips_entry not in zuma_lines:
-              zuma_lines.append(fips_entry)
+              zuma_lines.insert(0, fips_entry)
               zuma_ramdisk.write_text("\n".join(zuma_lines) + "\n")
+          if not zuma_lines or zuma_lines[0] != fips_entry:
+              raise SystemExit("Native FIPS module must be first in the Zuma ramdisk load list")
           shusky_lines = shusky_ramdisk.read_text().splitlines()
           if fips_entry in shusky_lines:
               raise SystemExit("FIPS module is unexpectedly assigned to the Shusky ramdisk list")
@@ -577,6 +579,8 @@ jobs:
           print("FIPS defconfig fragment:", fips_defconfig)
           print("FIPS module in Zuma ramdisk list at line:", zuma_lines.index(fips_entry) + 1)
           print("FIPS module occurrences in Zuma list:", zuma_lines.count(fips_entry))
+          if zuma_lines.index(fips_entry) != 0:
+              raise SystemExit("Native FIPS module is not first in the Zuma ramdisk load list")
 
           shusky.write_text(s)
           common.write_text(c)
