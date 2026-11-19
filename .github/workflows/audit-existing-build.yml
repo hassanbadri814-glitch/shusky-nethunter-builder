@@ -6,6 +6,7 @@ on:
       - phase2/rtl8187b-driver-audit
     paths:
       - .github/workflows/audit-existing-build.yml
+      - scripts/audit-dlkm-images.sh
   workflow_dispatch:
     inputs:
       source_run_id:
