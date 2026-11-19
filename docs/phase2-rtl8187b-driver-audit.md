@@ -86,11 +86,18 @@ The Android 6.1 Shusky branch maintains the GKI-wide additional KMI symbol-list 
 
 ## Exact GKI kernel-release stamping
 
-The first successful compile exposed `-dirty` vermagic because the RTL8187 KMI compatibility patch modifies the pinned `kernel/common` source tree. Kleaf documents `workspace_status.json` in the common kernel directory as the supported override for `SCMVERSION`. The workflow now writes the exact suffix `-android14-11-gfa1d6308d1fe-ab14691759` to `aosp/workspace_status.json` before the build, and all module audits require the complete exact release `6.1.145-android14-11-gfa1d6308d1fe-ab14691759` rather than stripping `-ab` and comparing only a prefix. This does not alter the Pixel KMI lists, exported symbols, FIPS configuration, or device partitions. The next CI run must prove that Kleaf applies this override to every staged module; no artifact is accepted until that check and the downstream audits pass.
+The pinned GKI source commit is `fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462`, associated with GKI build `14691759`. The RTL8187 KMI compatibility patch intentionally modifies exactly three tracked source files in `kernel/common`, so Kleaf's local Git version calculation truthfully adds `-dirty`. The expected full release is therefore:
 
+`6.1.145-android14-11-gfa1d6308d1fe-dirty-ab14691759`
+
+The workflow does not conceal or normalize away `-dirty`. Its workspace-status wrapper checks the exact pinned Git commit, the exact three-file source delta, clean diff formatting, the Repo manifest and the official Kleaf status output. It requires the observed `aosp` SCM value to be exactly `-gfa1d6308d1fe-dirty-ab14691759`. A later audit must also prove that the kernel Image and every staged module carry the same complete release. The previous `workspace_status.json` override was ineffective with Kleaf's default localversion path and is no longer treated as authoritative.
 
 ## Kleaf SCM stamping and reusable build cache
 
-The first explicit `workspace_status.json` attempt did not change the staged module vermagic: 547 modules still contained the `-dirty` suffix. The next build therefore does not proceed directly to compilation. It exports the pinned Repo manifest after pinning `kernel/common`, passes that manifest to Kleaf with `--repo_manifest`, and runs a Bazel `--nobuild` preflight. The preflight reads Bazel's `stable-status.txt` and requires the exact SCM suffix for GKI build 14691759 with no `dirty` value. If the stamp is still wrong or cannot be read, the workflow stops before the expensive kernel build.
+Kleaf's default localversion calculation derives the source hash and dirty state directly from Git. A `workspace_status.json` SCMVERSION override did not affect the resulting module vermagic and must not be relied on for this build. The workflow now runs an explicit status wrapper before compilation and also supplies it as Bazel's `--workspace_status_command`. The wrapper exports the exact Repo manifest and GKI build number, validates the pinned source revision and permitted three-file patch, and passes Google's own status output through unchanged. The build fails before compilation if the observed SCM identity differs from the expected truthful dirty release.
 
 The Bazel disk cache is restored with a versioned GKI/RTL8187 key and saved in a separate `actions/cache/save` step with `if: always()`. Completed Bazel actions can therefore be reused after a failed compile or audit. The Repo source cache remains separate and continues to retain the synchronized Google source objects.
+
+## Whitespace regression caught by SCM preflight
+
+Run `44442181765` correctly stopped before kernel compilation because removing the redundant RTL8187 rfkill wrapper left an extra blank line at EOF in `rfkill.c`. Google's source diff check rejected it. The KMI patch script now trims trailing whitespace from that edited file and writes exactly one final newline. The strict `git diff --check` remains enabled; the check itself is not weakened.
