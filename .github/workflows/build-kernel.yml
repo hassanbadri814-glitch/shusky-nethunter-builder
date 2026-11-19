@@ -474,7 +474,7 @@ jobs:
           grep -Eq 'config RTL8187([[:space:]]|$)' "$RTL_KCONFIG"
           grep -Eq 'select EEPROM_93CX6' "$RTL_KCONFIG"
           grep -Eq 'obj-\$\(CONFIG_RTL8187\).*rtl8187\.o' "$RTL_DIR/Makefile"
-          test -s aosp/drivers/misc/eeprom/93cx6.c
+          test -s aosp/drivers/misc/eeprom/eeprom_93cx6.c
           test -s aosp/drivers/misc/eeprom/Makefile
           {
             echo "RTL8187 source directory: $RTL_DIR"
