@@ -57,6 +57,7 @@ jobs:
             clang \
             cmake \
             curl \
+            e2fsprogs \
             flex \
             git \
             kmod \
@@ -1323,6 +1324,32 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/audit-rtl8187.sh" \
             "$WORKSPACE" "$EXPECTED_KERNEL_RELEASE" "$REPORT_DIR" "$FIPS_CONFIG" "14691759"
 
+      - name: Verify RTL8187 and EEPROM inside final DLKM images
+        if: success()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$WORKSPACE"
+          mapfile -t RTL_MODULES < <(
+            find out/bazel -type f \
+              -path '*/kernel_images_*/staging/lib/modules/*/kernel/drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko' \
+              -print | sort -u
+          )
+          mapfile -t EEPROM_MODULES < <(
+            find out/bazel -type f \
+              -path '*/kernel_images_*/staging/lib/modules/*/kernel/drivers/misc/eeprom/eeprom_93cx6.ko' \
+              -print | sort -u
+          )
+          test "${#RTL_MODULES[@]}" -ge 1
+          test "${#EEPROM_MODULES[@]}" -ge 1
+          test -s out/shusky/dist/vendor_dlkm.img
+          test -s out/shusky/dist/system_dlkm.img
+          bash "$GITHUB_WORKSPACE/scripts/audit-dlkm-images.sh" \
+            out/shusky/dist/vendor_dlkm.img \
+            out/shusky/dist/system_dlkm.img \
+            "${RTL_MODULES[0]}" "${EEPROM_MODULES[0]}" \
+            "$EXPECTED_KERNEL_RELEASE" "$REPORT_DIR"
+
       - name: Collect build outputs and reports
         if: always()
         shell: bash
@@ -1352,38 +1379,37 @@ jobs:
               -print
           } | tee "$REPORT_DIR/build-summary.txt"
 
-      - name: Package Native FIPS build artifacts
-        if: always()
+      - name: Package verified Native FIPS and RTL8187 artifacts
+        if: success()
         shell: bash
         run: |
-          set +e
-          cd "$WORKSPACE" || exit 0
-          mkdir -p "$REPORT_DIR/package"
-          find . -type f \
-            \( -name Image \
-            -o -name Image.lz4 \
-            -o -name boot.img \
-            -o -name vendor_boot.img \
-            -o -name vendor_kernel_boot.img \
-            -o -name vendor_dlkm.img \
-            -o -name system_dlkm.img \
-            -o -name dtbo.img \
-            -o -name fips140.ko \
-            -o -name rtl8187.ko \
-            -o -name eeprom_93cx6.ko \
-            -o -name modules.load \
-            -o -name modules.dep \
-            -o -name modules.softdep \) \
-            -not -path './build-report/package/*' \
-            -not -path './build-report/*' \
-            -exec cp --parents {} "$REPORT_DIR/package/" \;
-          zip -qr \
-            shiba-nethunter-native-fips-build-test.zip \
-            build-report \
-            2>/dev/null || true
+          set -Eeuo pipefail
+          cd "$WORKSPACE"
+          DIST="out/shusky/dist"
+          PACKAGE="$REPORT_DIR/package"
+          mkdir -p "$PACKAGE/dist"
+          for FILE in Image boot.img vendor_kernel_boot.img dtbo.img system_dlkm.img vendor_dlkm.img fips140.ko rtl8187.ko eeprom_93cx6.ko modules.load modules.dep modules.softdep modules.alias; do
+            test -s "$DIST/$FILE" || { echo "ERROR: required final dist file missing: $FILE"; exit 1; }
+            cp -a "$DIST/$FILE" "$PACKAGE/dist/$FILE"
+          done
+          cp -a "$REPORT_DIR/rtl8187-module-verification.txt" "$PACKAGE/"
+          cp -a "$REPORT_DIR/rtl8187-kmi-crc-audit.txt" "$PACKAGE/"
+          cp -a "$REPORT_DIR/rtl8187-dlkm-image-verification.txt" "$PACKAGE/"
+          cp -a "$REPORT_DIR/fips-gki-crc-audit.txt" "$PACKAGE/"
+          cp -a "$REPORT_DIR/fips-hmac-execution-verification.txt" "$PACKAGE/"
+          cp -a "$REPORT_DIR/kernel-module-compatibility.txt" "$PACKAGE/"
+          (
+            cd "$PACKAGE"
+            find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          )
+          zip -qr "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" build-report
+          unzip -t "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip"
+          unzip -l "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" | grep -q 'package/dist/rtl8187.ko'
+          unzip -l "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" | grep -q 'package/dist/eeprom_93cx6.ko'
+          sha256sum "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" | tee "$REPORT_DIR/final-artifact-sha256.txt"
 
       - name: Audit flash image sizes against Pixel 8 stock partition capacities
-        if: always()
+        if: success()
         shell: bash
         run: |
           set -euo pipefail
@@ -1438,7 +1464,7 @@ jobs:
         with:
           name: shiba-native-fips-boot-image
           path: workspace/out/shusky/dist/boot.img
-          if-no-files-found: warn
+          if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
@@ -1448,7 +1474,7 @@ jobs:
         with:
           name: shiba-native-fips-vendor-kernel-boot-image
           path: workspace/out/shusky/dist/vendor_kernel_boot.img
-          if-no-files-found: warn
+          if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
@@ -1458,7 +1484,7 @@ jobs:
         with:
           name: shiba-native-fips-dtbo-image
           path: workspace/out/shusky/dist/dtbo.img
-          if-no-files-found: warn
+          if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
@@ -1468,7 +1494,7 @@ jobs:
         with:
           name: shiba-native-fips-system-dlkm-image
           path: workspace/out/shusky/dist/system_dlkm.img
-          if-no-files-found: warn
+          if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
@@ -1478,7 +1504,7 @@ jobs:
         with:
           name: shiba-native-fips-vendor-dlkm-image
           path: workspace/out/shusky/dist/vendor_dlkm.img
-          if-no-files-found: warn
+          if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
@@ -1489,14 +1515,20 @@ jobs:
           name: shiba-native-fips-module-and-ramdisk-metadata
           path: |
             workspace/out/shusky/dist/fips140.ko
+            workspace/out/shusky/dist/rtl8187.ko
+            workspace/out/shusky/dist/eeprom_93cx6.ko
+            workspace/out/shusky/dist/modules.alias
             workspace/out/shusky/dist/modules.load
             workspace/out/shusky/dist/modules.dep
             workspace/out/shusky/dist/modules.softdep
             workspace/build-report/image-size-audit.txt
             workspace/build-report/fips-hmac-execution-verification.txt
             workspace/build-report/fips-gki-crc-audit.txt
+            workspace/build-report/rtl8187-module-verification.txt
+            workspace/build-report/rtl8187-kmi-crc-audit.txt
+            workspace/build-report/rtl8187-dlkm-image-verification.txt
             workspace/build-report/final-dist-modules.load
-          if-no-files-found: warn
+          if-no-files-found: error
           compression-level: 6
           retention-days: 14
 
@@ -1508,6 +1540,6 @@ jobs:
           path: |
             workspace/build-report/
             workspace/shiba-nethunter-native-fips-build-test.zip
-          if-no-files-found: warn
+          if-no-files-found: error
           compression-level: 6
           retention-days: 14
