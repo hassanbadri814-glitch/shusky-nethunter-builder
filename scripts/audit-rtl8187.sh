@@ -69,24 +69,66 @@ for MODULE_PATH in "${MODULES[@]}"; do
   RELPATH="${MODULE_PATH#"$ROOT"/}"
   LINE="$(grep -F "$RELPATH:" "$DEPFILE" || true)"
   [ -n "$LINE" ] || fail "modules.dep lacks exact RTL8187 entry in $ROOT"
-  python3 - "$ROOT" "$LINE" "$DEPENDS" <<'PY'
-import os, sys
-root, line, depends = sys.argv[1:]
-lhs, sep, rhs = line.partition(":")
-if not sep or not lhs.endswith("/rtl8187.ko"):
-    raise SystemExit("ERROR: malformed RTL8187 modules.dep line")
-deps = rhs.split()
-for item in deps:
-    if not os.path.isfile(os.path.join(root, item)):
-        raise SystemExit(f"ERROR: modules.dep dependency does not exist: {item}")
-dep_names = {os.path.basename(x).removesuffix(".ko") for x in deps}
+  [ -s "$ROOT/modules.alias" ] || fail "modules.alias missing in $ROOT"
+  grep -Eiq 'usb:v0BDAp8187' "$ROOT/modules.alias" || fail "staged modules.alias lacks USB ID 0BDA:8187"
+  python3 - "$ROOT" "$RELPATH" "$DEPENDS" "$EXPECTED_RELEASE" <<'PY'
+import os, subprocess, sys
+root, entry, depends, expected = sys.argv[1:]
+depmap = {}
+with open(os.path.join(root, "modules.dep"), encoding="utf-8", errors="replace") as stream:
+    for raw in stream:
+        line = raw.rstrip("\n")
+        lhs, sep, rhs = line.partition(":")
+        if sep:
+            depmap[lhs.strip()] = rhs.split()
+if entry not in depmap:
+    raise SystemExit(f"ERROR: exact RTL8187 entry missing from modules.dep: {entry}")
+direct = depmap[entry]
+dep_names = {os.path.basename(x).removesuffix(".ko") for x in direct}
+for required in ("mac80211", "eeprom_93cx6"):
+    if required not in dep_names:
+        raise SystemExit(f"ERROR: direct dependency {required} absent from modules.dep")
 for name in filter(None, depends.split(",")):
     if name not in dep_names:
         raise SystemExit(f"ERROR: modinfo dependency {name} absent from modules.dep")
+visited, active = set(), set()
+def walk(path):
+    if path in active:
+        raise SystemExit(f"ERROR: module dependency cycle at {path}")
+    if path in visited:
+        return
+    full = os.path.join(root, path)
+    if not os.path.isfile(full):
+        raise SystemExit(f"ERROR: dependency module file missing: {path}")
+    active.add(path)
+    for child in depmap.get(path, []):
+        walk(child)
+    active.remove(path)
+    visited.add(path)
+walk(entry)
+for path in sorted(visited):
+    full = os.path.join(root, path)
+    vermagic = subprocess.check_output(["modinfo", "-F", "vermagic", full], text=True).split()[0]
+    release = vermagic.split()[0]
+    if "-ab" in release:
+        release = release.split("-ab", 1)[0]
+    if release != expected:
+        raise SystemExit(f"ERROR: dependency vermagic mismatch: {path}: {release} != {expected}")
+print("Recursive dependency closure:", len(visited), "modules")
+for path in sorted(visited):
+    print("  ", path)
 PY
   [ -s "$ROOT/kernel/net/mac80211/mac80211.ko" ] || fail "mac80211.ko absent from same staging tree"
   [ -s "$ROOT/kernel/drivers/misc/eeprom/eeprom_93cx6.ko" ] || fail "eeprom_93cx6.ko absent from same staging tree"
 done
+
+# When the kernel forces module signatures, reject unsigned RTL8187 binaries.
+RTL_SIGNER="$(modinfo -F signer "$MODULE")"
+RTL_SIG_KEY="$(modinfo -F sig_key "$MODULE")"
+if grep -qx 'CONFIG_MODULE_SIG_FORCE=y' "$CONFIG"; then
+  [ -n "$RTL_SIGNER" ] || fail "CONFIG_MODULE_SIG_FORCE=y but RTL8187 has no module signature"
+  [ -n "$RTL_SIG_KEY" ] || fail "CONFIG_MODULE_SIG_FORCE=y but RTL8187 signature key metadata is absent"
+fi
 
 # This is a hot-plug USB module: it must not be part of early boot modules.load.
 if find "$WORKSPACE/out/bazel" -type f -name modules.load -exec grep -lE '(^|/)rtl8187\.ko|(^|/)eeprom_93cx6\.ko' {} + | grep -q .; then
@@ -163,7 +205,9 @@ PY
   echo "Kernel release/vermagic: $RELEASE"
   echo "USB alias 0BDA:8187: PASS"
   echo "Declared dependencies: $DEPENDS"
-  echo "Same-tree mac80211 + EEPROM dependencies: PASS"
+  echo "Module signer: ${RTL_SIGNER:-unsigned}"
+  echo "Signature key ID: ${RTL_SIG_KEY:-none}"
+  echo "Recursive same-tree dependency closure + vermagic: PASS"
   echo "modules.dep direct dependency resolution: PASS"
   echo "No early-boot modules.load entry: PASS"
   echo "Pinned GKI + same-build Module.symvers CRC audit: PASS"
