@@ -706,6 +706,8 @@ jobs:
               )
           match = matches[0]
           srcs = match.group(2)
+          if '"//private/devices/google/zuma:vendor_dlkm_modules_list"' not in srcs:
+              raise SystemExit("ERROR: canonical Zuma vendor DLKM list source is missing")
           if '"vendor_dlkm.modules.shusky"' not in srcs:
               srcs = srcs.rstrip()
               if srcs and not srcs.endswith(","):
@@ -714,6 +716,8 @@ jobs:
               text = text[:match.start(2)] + srcs + text[match.end(2):]
           if text.count('name = "vendor_dlkm_modules_list"') != 1:
               raise SystemExit("ERROR: duplicate vendor_dlkm_modules_list rule")
+          if text.count('out = "vendor_dlkm.modules"') != 1:
+              raise SystemExit("ERROR: vendor_dlkm.modules must have exactly one generating rule")
           if 'vendor_dlkm_modules_list = ":vendor_dlkm_modules_list",' not in text:
               raise SystemExit("ERROR: existing Shusky vendor_dlkm_modules_list consumer was changed")
           if "vendor_dlkm.modules.shusky" not in text:
