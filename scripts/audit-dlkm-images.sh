@@ -34,13 +34,9 @@ debugfs -R "rdump / $TMP/system" "$SYSTEM_IMAGE" >"$TMP/system-rdump.log" 2>&1 |
     debugfs -R stats "$image" 2>&1 | grep -E 'Block count:|Block size:|Free blocks:|Inode count:|Free inodes:' || true
   done
   echo "=== vendor_dlkm largest files ==="
-  find "$TMP/vendor" -type f -printf '%s %p\\n' | sort -nr | head -30
+  find "$TMP/vendor" -type f -printf '%s %p\n | sort -nr | head -30
   echo "=== vendor_dlkm modules.load ==="
-  if [ -f "$TMP/vendor/lib/modules/modules.load" ]; then
-    cat "$TMP/vendor/lib/modules/modules.load"
-  else
-    echo "MISSING"
-  fi
+  find "$TMP/vendor" -type f -path '*/lib/modules/*/modules.load' -print -exec cat {} \;
   echo "=== system_dlkm largest files ==="
   find "$TMP/system" -type f -printf '%s %p\\n' | sort -nr | head -20
 } | tee "$REPORT_DIR/dlkm-filesystem-diagnostics.txt"
@@ -94,5 +90,6 @@ fi
   echo "Same DLKM module tree: PASS"
   echo "modules.dep direct dependencies: PASS"
   echo "modules.alias USB 0BDA:8187: PASS"
-  echo "vendor_dlkm second-stage modules.load includes RTL8187 + EEPROM: PASS"\n  echo "First-stage ramdisk modules.load excludes RTL8187 + EEPROM: checked by staged audit"
+  echo "vendor_dlkm second-stage modules.load includes RTL8187 + EEPROM: PASS"
+  echo "First-stage ramdisk modules.load excludes RTL8187 + EEPROM: checked by staged audit"
 } | tee "$REPORT_DIR/rtl8187-dlkm-image-verification.txt"
