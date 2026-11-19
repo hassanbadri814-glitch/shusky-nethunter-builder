@@ -1371,7 +1371,7 @@ jobs:
           consumer = entries("ufs-exynos-gs.ko")[0]
           provider = entries("ufs-pixel-fips140.ko")[0]
           dep_records = []
-          for dep_path in load_path.parent.rglob("modules.dep"):
+          for dep_path in Path("out").rglob("modules.dep"):
               for line in dep_path.read_text(encoding="utf-8", errors="replace").splitlines():
                   if line.strip() and line.split(":", 1)[0] == consumer:
                       dep_records.append((dep_path, line.split(":", 1)[1].split()))
