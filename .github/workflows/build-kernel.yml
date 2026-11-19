@@ -42,7 +42,9 @@ jobs:
           bash -n "$GITHUB_WORKSPACE/scripts/patch-rtl8187-kmi.sh"
           bash -n "$GITHUB_WORKSPACE/scripts/audit-rtl8187-kmi-base.sh"
           bash -n "$GITHUB_WORKSPACE/scripts/kleaf-workspace-status.sh"
+          bash -n "$GITHUB_WORKSPACE/scripts/kleaf-prebuilt-gki-status.sh"
           chmod +x "$GITHUB_WORKSPACE/scripts/kleaf-workspace-status.sh"
+          chmod +x "$GITHUB_WORKSPACE/scripts/kleaf-prebuilt-gki-status.sh"
           ruby -e 'require "yaml"; YAML.load_file(ARGV.fetch(0))' "$GITHUB_WORKSPACE/.github/workflows/build-kernel.yml"
           python3 <<'PY'
           from pathlib import Path
@@ -58,6 +60,7 @@ jobs:
               "scripts/patch-rtl8187-kmi.sh",
               "scripts/audit-rtl8187-kmi-base.sh",
               "scripts/kleaf-workspace-status.sh",
+              "scripts/kleaf-prebuilt-gki-status.sh",
               "additional_kmi_symbol_lists",
               "abi_gki_aarch64_virtual_device",
               "VIRTUAL_ABI_LABEL",
@@ -793,7 +796,7 @@ jobs:
           cd "$WORKSPACE"
           tools/bazel run \
             --repo_manifest "$(realpath out/manifest.xml)" \
-            --workspace_status_command="$GITHUB_WORKSPACE/scripts/kleaf-workspace-status.sh" \
+            --workspace_status_command="$GITHUB_WORKSPACE/scripts/kleaf-prebuilt-gki-status.sh" \
             --config=stamp \
             --config=shusky \
             --kernel_package=@//aosp \
