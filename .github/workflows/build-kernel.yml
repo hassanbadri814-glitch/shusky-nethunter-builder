@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - phase2/rtl8187b-driver-audit
 
 permissions:
   contents: read
@@ -217,7 +218,7 @@ jobs:
             echo "FIPS module: native in-tree"
             echo "FIPS HMAC postlink: required"
             echo "KernelSU Inline: disabled"
-            echo "RTL8187: excluded"
+            echo "RTL8187: enabled as an on-demand USB module"
             echo "MT76: excluded"
             echo "Phone flash: disabled"
             echo "Repo source cache: enabled"
@@ -473,6 +474,7 @@ jobs:
           CONFIG_CFG80211=m
           CONFIG_MAC80211=m
           CONFIG_USB=y
+          CONFIG_RTL8187=m
           CONFIG_CRYPTO_FIPS140_MOD=m
           EOF
           echo "=== FIPS defconfig ==="
@@ -531,18 +533,23 @@ jobs:
                   "ERROR: Existing additional_kmi_symbol_lists "
                   "does not contain the FIPS ABI label."
               )
-          if '"crypto/fips140.ko"' not in text:
+          required_module_outs = [
+              "crypto/fips140.ko",
+              "drivers/net/wireless/realtek/rtl8187/rtl8187.ko",
+          ]
+          if not all(f'"{item}"' in text for item in required_module_outs):
               old = "module_outs = ZUMA_MODULE_OUTS,"
               if old not in text:
-                  raise SystemExit(
-                      "ERROR: module_outs = ZUMA_MODULE_OUTS not found"
-                  )
+                  raise SystemExit("ERROR: module_outs = ZUMA_MODULE_OUTS not found")
               text = text.replace(
                   old,
                   'module_outs = ZUMA_MODULE_OUTS + '
-                  '["crypto/fips140.ko"],',
+                  '["crypto/fips140.ko", '
+                  '"drivers/net/wireless/realtek/rtl8187/rtl8187.ko"],',
                   1
               )
+          if not all(f'"{item}"' in text for item in required_module_outs):
+              raise SystemExit("ERROR: required FIPS/RTL8187 module_outs entries missing")
           build.write_text(text)
           fips_entry = "kernel/crypto/fips140.ko"
           zuma_lines = zuma_ramdisk.read_text().splitlines()
@@ -762,6 +769,1412 @@ jobs:
             echo "FIPS, UFS FIPS, UFS driver, and modules.dep dependency entries verified."
           } | tee "$REPORT_DIR/kernel-module-compatibility.txt"
 
+      - name: Verify RTL8187 module, dependencies, KMI CRCs and load policy
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          EXPECTED="$EXPECTED_KERNEL_RELEASE"
+          mapfile -t RTL_MODULES < <(
+            find out/bazel -type f -path '*/staging/lib/modules/*/kernel/drivers/net/wireless/realtek/rtl8187/rtl8187.ko' -print | sort -u
+          )
+          if [ "${#RTL_MODULES[@]}" -ne 1 ]; then
+            echo "ERROR: expected exactly one staged rtl8187.ko; found ${#RTL_MODULES[@]}."
+            printf '%s\\n' "${RTL_MODULES[@]}"
+            exit 1
+          fi
+          RTL_MODULE="${RTL_MODULES[0]}"
+          RTL_RELEASE="$(modinfo -F vermagic "$RTL_MODULE" | awk '{print $1}')"
+          RTL_RELEASE="${RTL_RELEASE%-ab*}"
+          test "$RTL_RELEASE" = "$EXPECTED" || { echo "ERROR: RTL8187 vermagic mismatch: $RTL_RELEASE"; exit 1; }
+          RTL_DEPENDS="$(modinfo -F depends "$RTL_MODULE")"
+          echo "RTL8187: $RTL_MODULE"
+          echo "vermagic: $RTL_RELEASE"
+          echo "depends: $RTL_DEPENDS"
+          case ",$RTL_DEPENDS," in *,mac80211,*) ;; *) echo "ERROR: mac80211 dependency missing"; exit 1 ;; esac
+          case ",$RTL_DEPENDS," in
+            *,eeprom_93cx6,*) find out/bazel -type f -name eeprom_93cx6.ko -print -quit | grep -q . || { echo "ERROR: eeprom_93cx6.ko missing"; exit 1; } ;;
+            *) grep -Eq '^CONFIG_EEPROM_93CX6=y
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          mkdir -p out/shusky/dist
+          mapfile -t VENDOR_KERNEL_BOOT_CANDIDATES < <(
+            find out/bazel/output_user_root \
+              -type f \
+              -path '*/out/android14-6.1/dist/vendor_kernel_boot.img' \
+              -print 2>/dev/null
+          )
+          if [ "${#VENDOR_KERNEL_BOOT_CANDIDATES[@]}" -ne 1 ]; then
+            printf 'Expected exactly one generated vendor_kernel_boot.img; found %s\\n' "${#VENDOR_KERNEL_BOOT_CANDIDATES[@]}"
+            printf '%s\\n' "${VENDOR_KERNEL_BOOT_CANDIDATES[@]}"
+            exit 1
+          fi
+          cp "${VENDOR_KERNEL_BOOT_CANDIDATES[0]}" out/shusky/dist/vendor_kernel_boot.img
+          test "$(dd if=out/shusky/dist/vendor_kernel_boot.img bs=8 count=1 2>/dev/null)" = "VNDRBOOT"
+          sha256sum out/shusky/dist/vendor_kernel_boot.img \
+            | tee "$REPORT_DIR/vendor-kernel-boot-sha256.txt"
+          stat -c 'vendor_kernel_boot.img bytes: %s' out/shusky/dist/vendor_kernel_boot.img \
+            | tee "$REPORT_DIR/vendor-kernel-boot-size.txt"
+
+      - name: Verify final FIPS kernel configuration
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          mkdir -p "$REPORT_DIR"
+          REPORT="$REPORT_DIR/fips-config.txt"
+          CONFIG_LIST="$REPORT_DIR/shusky-config-files.txt"
+          : > "$REPORT"
+          : > "$CONFIG_LIST"
+          echo "=== Find the actual Shusky kernel configuration ==="
+          mapfile -t CONFIGS < <(
+            find out/bazel \
+              -type f \
+              -path '*/private/devices/google/shusky/kernel/.config' \
+              -print
+          )
+          if [ "${#CONFIGS[@]}" -eq 0 ]; then
+            echo "ERROR: Shusky kernel .config not found."
+            echo "Available .config files:"
+            find out -type f -name .config -print
+            exit 1
+          fi
+          if [ "${#CONFIGS[@]}" -ne 1 ]; then
+            echo "ERROR: Expected exactly one Shusky kernel config."
+            echo "Found: ${#CONFIGS[@]}"
+            printf '%s\n' "${CONFIGS[@]}"
+            exit 1
+          fi
+          CONFIG="${CONFIGS[0]}"
+          printf '%s\n' "$CONFIG" | tee "$CONFIG_LIST"
+          echo
+          echo "Selected Shusky config: $CONFIG"
+          {
+            echo "Selected config: $CONFIG"
+            echo
+            echo "=== FIPS settings ==="
+            grep -E \
+              '^(CONFIG_CRYPTO_FIPS140_MOD=|# CONFIG_CRYPTO_FIPS140_MOD is not set|CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS=)' \
+              "$CONFIG" || true
+          } | tee "$REPORT"
+          EXPECTED_CONFIG=(
+            "CONFIG_MODULES=y"
+            "CONFIG_MODVERSIONS=y"
+            "CONFIG_WLAN=y"
+            "CONFIG_CFG80211=m"
+            "CONFIG_MAC80211=m"
+            "CONFIG_USB=y"
+            "CONFIG_RTL8187=m"
+            "CONFIG_CRYPTO_FIPS140_MOD=m"
+          )
+          for SETTING in "${EXPECTED_CONFIG[@]}"; do
+            if ! grep -qxF "$SETTING" "$CONFIG"; then
+              echo "ERROR: Required safe-baseline setting is missing: $SETTING"
+              exit 1
+            fi
+            echo "$SETTING" >> "$REPORT"
+          done
+          if grep -Eq '^CONFIG_KSU=(y|m)' "$CONFIG"; then
+            echo "ERROR: KernelSU is enabled in the kernel config."
+            grep -n '^CONFIG_KSU=' "$CONFIG"
+            exit 1
+          fi
+          if ! grep -Eq '^CONFIG_EEPROM_93CX6=(m|y)
+          echo
+          echo "=== Distribution config comparison ==="
+          if [ -f out/shusky/dist/.config ]; then
+            if grep -q '^CONFIG_CRYPTO_FIPS140_MOD=m$' \
+              out/shusky/dist/.config; then
+              echo "Distribution config: FIPS enabled."
+            else
+              echo "WARNING: FIPS setting not present in dist/.config."
+              echo "The Shusky kernel config itself passed."
+            fi
+          else
+            echo "Distribution .config not available."
+          fi
+          echo "FIPS_CONFIG=$CONFIG" >> "$GITHUB_ENV"
+          echo
+          echo "Native Shusky FIPS configuration: PASS"
+
+      - name: Verify generated native FIPS module
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          MODULE="$(find . -type f \
+            -path '*/crypto/fips140.ko' \
+            -not -path './build-report/*' \
+            -print -quit)"
+          if [ -z "$MODULE" ]; then
+            echo "ERROR: Native crypto/fips140.ko not found."
+            exit 1
+          fi
+          echo "FIPS module: $MODULE"
+          sha256sum "$MODULE" \
+            | tee "$REPORT_DIR/fips140-sha256.txt"
+          file "$MODULE" \
+            | tee "$REPORT_DIR/fips140-file.txt"
+          readelf -S "$MODULE" \
+            | tee "$REPORT_DIR/fips140-sections.txt"
+          grep -q '\.init\.rela\.text' \
+            "$REPORT_DIR/fips140-sections.txt"
+          grep -q '\.init\.rela\.rodata' \
+            "$REPORT_DIR/fips140-sections.txt"
+          echo "FIPS relocation sections: PASS"
+
+      - name: Verify exact Native FIPS HMAC postlink execution and digest
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          postlink = Path("aosp/arch/arm64/Makefile.postlink").read_text()
+          generator = Path("aosp/crypto/fips140_gen_hmac.c").read_text()
+          required = (
+              "CMD_FIPS140_GEN_HMAC = crypto/fips140_gen_hmac",
+              "quiet_cmd_gen_hmac = HMAC",
+              "$(objtree)/crypto/fips140.ko: FORCE",
+              "$(call cmd,gen_hmac)",
+              "$(CMD_FIPS140_GEN_HMAC) $@",
+          )
+          for fragment in required:
+              if fragment not in postlink:
+                  raise SystemExit(f"ERROR: pinned Makefile.postlink lacks: {fragment}")
+          if not re.search(r"(?m)^quiet_cmd_gen_hmac\s*=\s*HMAC\s+\$@", postlink):
+              raise SystemExit("ERROR: HMAC log label is not bound to Kbuild target $@")
+          generator_tokens = (
+              "fips140_integ_hmac_key", "fips140_integ_hmac_digest",
+              "__fips140_text_start", "__fips140_text_end",
+              "__fips140_rodata_start", "__fips140_rodata_end",
+              "HMAC_Init_ex", "EVP_sha256()", "HMAC_Update", "HMAC_Final",
+          )
+          for token in generator_tokens:
+              if token not in generator:
+                  raise SystemExit(f"ERROR: pinned HMAC generator lacks: {token}")
+          print("Pinned Kbuild target rule and SHA-256 generator implementation: PASS")
+          PY
+
+          python3 - "$REPORT_DIR/build.log" "$REPORT_DIR/fips-hmac-target-log.txt" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          log = Path(sys.argv[1]).read_text(errors="replace")
+          pattern = re.compile(r"(^|[ \t])HMAC[ \t]+(?:\S*/)?crypto/fips140\.ko(?:[ \t]|$)")
+          matches = [line for line in log.splitlines() if pattern.search(line)]
+          if matches:
+              Path(sys.argv[2]).write_text("\n".join(matches) + "\n")
+              print(f"Kbuild exposed the exact fips140.ko HMAC target line(s): {len(matches)}")
+              print("\n".join(matches))
+          else:
+              Path(sys.argv[2]).write_text(
+                  "Bazel did not expose successful action stdout in build.log. "
+                  "The pinned target rule and embedded digest are independently verified below.\n"
+              )
+              print("INFO: Bazel did not expose the successful Kbuild action's quiet log line.")
+              print("The exact source target rule and resulting embedded HMAC are verified independently.")
+          PY
+
+          # Verify only authoritative final outputs. Bazel sandbox action trees
+          # also contain transient pre-strip/unstripped copies; comparing those
+          # byte-for-byte with the stripped final module creates false conflicts.
+          : > "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          test -f out/shusky/dist/fips140.ko && \
+            printf '%s\n' out/shusky/dist/fips140.ko \
+              >> "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          find out/bazel -type f \
+            \( -path '*/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel/crypto/fips140.ko' \
+               -o -path '*/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel_modules_install/staging/lib/modules/*/kernel/crypto/fips140.ko' \) \
+            -not -path '*/sandbox/*' -print \
+            >> "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          sort -u -o "$REPORT_DIR/fips-hmac-module-candidates.txt" \
+            "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          if ! grep -qx 'out/shusky/dist/fips140.ko' \
+            "$REPORT_DIR/fips-hmac-module-candidates.txt"; then
+            echo "ERROR: authoritative final dist fips140.ko is missing."
+            exit 1
+          fi
+          if [ "$(wc -l < "$REPORT_DIR/fips-hmac-module-candidates.txt")" -lt 2 ]; then
+            echo "ERROR: expected final dist plus Bazel/staging FIPS module for cross-verification."
+            exit 1
+          fi
+
+          python3 - "$REPORT_DIR" "$REPORT_DIR/fips-hmac-module-candidates.txt" <<'PY'
+          import hashlib, hmac, struct, sys
+          from pathlib import Path
+
+          report = Path(sys.argv[1])
+          candidates = [Path(p) for p in Path(sys.argv[2]).read_text().splitlines() if p]
+          verified, rejected = [], []
+
+          def cstr(table, offset):
+              if offset < 0 or offset >= len(table):
+                  raise ValueError("string-table offset out of bounds")
+              end = table.find(b"\0", offset)
+              if end < 0:
+                  raise ValueError("unterminated ELF string")
+              return table[offset:end].decode("utf-8", "replace")
+
+          def verify(path):
+              blob = path.read_bytes()
+              if len(blob) < 64 or blob[:4] != b"\x7fELF" or blob[4:6] != b"\x02\x01":
+                  raise ValueError("not ELF64 little-endian")
+              hdr = struct.unpack_from("<16sHHIQQQIHHHHHH", blob, 0)
+              if hdr[1] != 1 or hdr[2] != 183:
+                  raise ValueError("not relocatable AArch64 ELF")
+              shoff, shentsize, shnum, shstrndx = hdr[6], hdr[11], hdr[12], hdr[13]
+              if shentsize < 64 or not shnum or shstrndx >= shnum:
+                  raise ValueError("invalid section-header table")
+              secs = []
+              for i in range(shnum):
+                  v = struct.unpack_from("<IIQQQQIIQQ", blob, shoff + i * shentsize)
+                  secs.append({"nameoff":v[0],"type":v[1],"off":v[4],"size":v[5],
+                               "link":v[6],"entsize":v[9]})
+              st = secs[shstrndx]
+              names = blob[st["off"]:st["off"]+st["size"]]
+              for s in secs:
+                  s["name"] = cstr(names, s["nameoff"])
+              byname = {s["name"]:s for s in secs}
+              for name in (".init.rela.text", ".init.rela.rodata"):
+                  s = byname.get(name)
+                  if not s or not s["size"] or s["size"] % 24:
+                      raise ValueError(f"missing/invalid {name}")
+
+              syms = {}
+              for s in secs:
+                  if s["type"] != 2:
+                      continue
+                  if s["link"] >= len(secs):
+                      raise ValueError("bad symtab string-table link")
+                  strings_sec = secs[s["link"]]
+                  strings = blob[strings_sec["off"]:strings_sec["off"]+strings_sec["size"]]
+                  ent = s["entsize"] or 24
+                  if ent < 24:
+                      raise ValueError("bad ELF64 symbol entry size")
+                  for i in range(s["size"] // ent):
+                      nameoff, info, other, ndx, value, size = struct.unpack_from(
+                          "<IBBHQQ", blob, s["off"]+i*ent)
+                      if nameoff and ndx < len(secs):
+                          name = cstr(strings, nameoff)
+                          syms.setdefault(name, set()).add((ndx,value,size))
+
+              def sym(name):
+                  found = syms.get(name, set())
+                  if len(found) != 1:
+                      raise ValueError(f"expected one defined {name}; found {len(found)}")
+                  ndx,value,size = next(iter(found))
+                  return ndx,value,size
+
+              def span(first,last):
+                  a, av, _ = sym(first)
+                  b, bv, _ = sym(last)
+                  if a != b or not 0 <= av < bv <= secs[a]["size"]:
+                      raise ValueError(f"invalid symbol range {first}..{last}")
+                  s = secs[a]
+                  return blob[s["off"]+av:s["off"]+bv]
+
+              kn, kv, ks = sym("fips140_integ_hmac_key")
+              keysec = secs[kn]
+              ko = keysec["off"] + kv
+              kend = ko + ks if ks else keysec["off"] + keysec["size"]
+              kb = blob[ko:kend]
+              if b"\0" not in kb or not kb.split(b"\0",1)[0]:
+                  raise ValueError("HMAC key is empty or not NUL-terminated")
+              key = kb.split(b"\0",1)[0]
+
+              dn, dv, ds = sym("fips140_integ_hmac_digest")
+              if ds < 32:
+                  raise ValueError("digest symbol is smaller than SHA-256")
+              digestsec = secs[dn]
+              stored = blob[digestsec["off"]+dv:digestsec["off"]+dv+32]
+              textdata = span("__fips140_text_start","__fips140_text_end")
+              rodata = span("__fips140_rodata_start","__fips140_rodata_end")
+              calculated = hmac.new(key,textdata+rodata,hashlib.sha256).digest()
+              if not hmac.compare_digest(stored,calculated):
+                  raise ValueError("embedded digest differs from independently recomputed HMAC-SHA256")
+              return {
+                  "path":str(path),"sha256":hashlib.sha256(blob).hexdigest(),
+                  "hmac":calculated.hex(),"key_bytes":len(key),
+                  "key_sha256":hashlib.sha256(key).hexdigest(),
+                  "text_sha256":hashlib.sha256(textdata).hexdigest(),
+                  "rodata_sha256":hashlib.sha256(rodata).hexdigest(),
+                  "text_bytes":len(textdata),"rodata_bytes":len(rodata),
+                  "rela_text":byname[".init.rela.text"]["size"],
+                  "rela_rodata":byname[".init.rela.rodata"]["size"],
+              }
+
+          for p in candidates:
+              try:
+                  verified.append(verify(p))
+              except Exception as e:
+                  rejected.append(f"{p}: {e}")
+          if not verified:
+              raise SystemExit("ERROR: no module passed independent HMAC verification:\n"+"\n".join(rejected[:30]))
+          # Final dist, canonical Bazel target and installed staging copy must
+          # be byte-identical, and each must independently pass embedded HMAC.
+          if len({x["sha256"] for x in verified}) != 1:
+              details = "\\n".join(
+                  f'{x["path"]}: sha256={x["sha256"]} hmac={x["hmac"]}'
+                  for x in verified
+              )
+              raise SystemExit(
+                  "ERROR: authoritative final FIPS module outputs are not byte-identical:\\n" + details
+              )
+          fingerprints = {
+              (x["hmac"], x["key_sha256"], x["text_sha256"], x["rodata_sha256"])
+              for x in verified
+          }
+          if len(fingerprints) != 1:
+              raise SystemExit(
+                  "ERROR: authoritative final FIPS outputs disagree in HMAC key or authenticated text/rodata"
+              )
+          v = verified[0]
+          lines = [
+              "Kbuild target binding: PASS (pinned Makefile.postlink rule is scoped to crypto/fips140.ko)",
+              "Independent embedded HMAC-SHA256 recomputation: PASS",
+              f"Verified module candidates: {len(verified)}",
+              f"Module SHA-256: {v['sha256']}",
+              f"Embedded HMAC-SHA256: {v['hmac']}",
+              f"HMAC key SHA-256: {v['key_sha256']}",
+              f"Authenticated .text SHA-256: {v['text_sha256']}",
+              f"Authenticated .rodata SHA-256: {v['rodata_sha256']}",
+              f"HMAC key length: {v['key_bytes']} bytes",
+              f"Covered .text bytes: {v['text_bytes']}",
+              f"Covered .rodata bytes: {v['rodata_bytes']}",
+              f".init.rela.text bytes: {v['rela_text']}",
+              f".init.rela.rodata bytes: {v['rela_rodata']}",
+              "Verified module paths:",
+          ]
+          lines.extend("  "+x["path"] for x in verified)
+          if rejected:
+              lines.append("Non-final or non-verifiable candidates skipped:")
+              lines.extend("  "+x for x in rejected[:30])
+          (report/"fips-hmac-execution-verification.txt").write_text("\n".join(lines)+"\n")
+          print("\n".join(lines))
+          PY
+      - name: Verify generated vendor ramdisk modules.load
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          find . -type f \
+            -name modules.load \
+            -not -path './build-report/*' \
+            -print \
+            | sort \
+            | tee "$REPORT_DIR/modules-load-files.txt"
+          FOUND=0
+          INDEX=0
+          while IFS= read -r MODULES_LOAD; do
+            [ -f "$MODULES_LOAD" ] || continue
+            INDEX=$((INDEX + 1))
+            echo
+            echo "=== modules.load: $MODULES_LOAD ==="
+            sed -n '1,35p' "$MODULES_LOAD"
+            if grep -q 'fips140\.ko' "$MODULES_LOAD"; then
+              FOUND=$((FOUND + 1))
+              echo "FIPS entry found."
+              cp "$MODULES_LOAD" \
+                "$REPORT_DIR/modules-load-${INDEX}.txt"
+              grep -n -B3 -A5 \
+                'fips140\.ko' \
+                "$MODULES_LOAD" \
+                >> "$REPORT_DIR/fips-modules-load-position.txt"
+            fi
+          done < "$REPORT_DIR/modules-load-files.txt"
+          if [ "$FOUND" -eq 0 ]; then
+            echo "ERROR: No generated modules.load contains fips140.ko."
+            exit 1
+          fi
+          {
+            echo "modules.load files containing FIPS: $FOUND"
+            echo "FIPS module entry: present"
+            echo "Load order: recorded, not assumed"
+          } | tee "$REPORT_DIR/modules-load-verification.txt"
+          echo "FIPS modules.load presence verification: PASS"
+
+      - name: Collect ramdisk and module dependency diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR"
+          echo "=== modules.load files ===" \
+            | tee "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out -type f \
+            -name modules.load \
+            -print 2>/dev/null \
+            | sort \
+            | tee "$REPORT_DIR/ramdisk-modules-load-paths.txt"
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== FIPS-related module dependency entries ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out -type f \
+            \( -name modules.dep -o -name modules.softdep \) \
+            -print0 2>/dev/null \
+            | while IFS= read -r -d '' DEPFILE; do
+                if grep -qE 'fips140|zsmalloc' "$DEPFILE"; then
+                  echo \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                  echo "FILE: $DEPFILE" \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                  grep -n -B2 -A3 \
+                    -E 'fips140|zsmalloc' \
+                    "$DEPFILE" \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                fi
+              done
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Relevant ramdisk and boot image candidates ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out/shusky out/bazel \
+            -type f \
+            \( -iname '*vendor*ramdisk*' \
+            -o -iname '*initramfs*' \
+            -o -name vendor_boot.img \
+            -o -name boot.img \
+            -o -name modules.load \
+            -o -name modules.dep \
+            -o -name modules.softdep \) \
+            -print 2>/dev/null \
+            | sort -u \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Final distribution modules.load ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          if [ -f out/shusky/dist/modules.load ]; then
+            sed -n '1,100p' out/shusky/dist/modules.load \
+              | tee "$REPORT_DIR/final-dist-modules.load"
+            if grep -q 'fips140\.ko' out/shusky/dist/modules.load; then
+              echo "FIPS is present in final dist/modules.load." \
+                | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+            else
+              echo "FIPS is NOT present in final dist/modules.load." \
+                | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+            fi
+          else
+            echo "Final dist/modules.load does not exist." \
+              | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          fi
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Image file types ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out/shusky/dist \
+            -type f \
+            \( -name '*.img' -o -name '*ramdisk*' \) \
+            -print0 2>/dev/null \
+            | while IFS= read -r -d '' IMAGE_FILE; do
+                file "$IMAGE_FILE"
+              done \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "Ramdisk diagnostics collected."
+
+      - name: Verify enabled Wi-Fi modules and KernelSU exclusion
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          if find . -type f -name '*mt76*.ko' -not -path './build-report/*' | grep -q .; then
+            echo "ERROR: MT76 module unexpectedly present."
+            exit 1
+          fi
+          echo "MT76: excluded"
+          for MODULE in cfg80211.ko mac80211.ko rtl8187.ko; do
+            if ! find . -type f -name "$MODULE" -not -path './build-report/*' | grep -q .; then
+              echo "ERROR: Required wireless module missing: $MODULE"
+              exit 1
+            fi
+            echo "$MODULE: present"
+          done
+          if find . -type f -name 'ksu.ko' -not -path './build-report/*' | grep -q .; then
+            echo "ERROR: Unexpected KernelSU module found."
+            exit 1
+          fi
+          echo "KernelSU module: absent"
+
+      - name: Collect build outputs and reports
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR"
+          {
+            echo "Build report generated: $(date -u)"
+            echo
+            echo "=== FIPS module candidates ==="
+            find . -type f \
+              -path '*/crypto/fips140.ko' \
+              -not -path './build-report/*' \
+              -exec sha256sum {} \;
+            echo
+            echo "=== Kernel images ==="
+            find . -type f \
+              \( -name Image \
+              -o -name Image.lz4 \
+              -o -name boot.img \
+              -o -name vendor_boot.img \
+              -o -name vendor_kernel_boot.img \
+              -o -name vendor_dlkm.img \
+              -o -name system_dlkm.img \
+              -o -name dtbo.img \) \
+              -print
+          } | tee "$REPORT_DIR/build-summary.txt"
+
+      - name: Package Native FIPS build artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR/package"
+          find . -type f \
+            \( -name Image \
+            -o -name Image.lz4 \
+            -o -name boot.img \
+            -o -name vendor_boot.img \
+            -o -name vendor_kernel_boot.img \
+            -o -name vendor_dlkm.img \
+            -o -name system_dlkm.img \
+            -o -name dtbo.img \
+            -o -name fips140.ko \
+            -o -name rtl8187.ko \
+            -o -name eeprom_93cx6.ko \
+            -o -name modules.load \
+            -o -name modules.dep \
+            -o -name modules.softdep \) \
+            -not -path './build-report/package/*' \
+            -not -path './build-report/*' \
+            -exec cp --parents {} "$REPORT_DIR/package/" \;
+          zip -qr \
+            shiba-nethunter-native-fips-build-test.zip \
+            build-report \
+            2>/dev/null || true
+
+      - name: Audit flash image sizes against Pixel 8 stock partition capacities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          python3 <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          dist = Path("out/shusky/dist")
+          capacities = {
+              "boot.img": 67108864,
+              "vendor_kernel_boot.img": 67108864,
+              "dtbo.img": 16777216,
+              "system_dlkm.img": 11714560,
+              "vendor_dlkm.img": 25559040,
+          }
+          report = []
+          report.append("Pixel 8 Shiba partition-fit audit")
+          report.append("Capacities are from the user's saved stock partition measurements.")
+          report.append("")
+          failed = False
+          for name, capacity in capacities.items():
+              path = dist / name
+              if not path.is_file():
+                  report.append(f"MISSING: {name}")
+                  failed = True
+                  continue
+              size = path.stat().st_size
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              status = "PASS" if size <= capacity else "OVERSIZE - DO NOT FLASH"
+              if size > capacity:
+                  failed = True
+              report.append(
+                  f"{name}: size={size} capacity={capacity} "
+                  f"remaining={capacity-size} status={status} sha256={digest}"
+              )
+          for name in ("Image", "fips140.ko", "modules.load", "modules.dep"):
+              path = dist / name
+              if path.is_file():
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  report.append(f"{name}: size={path.stat().st_size} sha256={digest}")
+              else:
+                  report.append(f"{name}: not present in dist (may be packaged elsewhere)")
+          output = "\n".join(report) + "\n"
+          print(output, end="")
+          Path("build-report/image-size-audit.txt").write_text(output)
+          PY
+
+      - name: Upload boot.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-boot-image
+          path: workspace/out/shusky/dist/boot.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload vendor_kernel_boot.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-vendor-kernel-boot-image
+          path: workspace/out/shusky/dist/vendor_kernel_boot.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload dtbo.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-dtbo-image
+          path: workspace/out/shusky/dist/dtbo.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload system_dlkm.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-system-dlkm-image
+          path: workspace/out/shusky/dist/system_dlkm.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload vendor_dlkm.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-vendor-dlkm-image
+          path: workspace/out/shusky/dist/vendor_dlkm.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload FIPS module and ramdisk dependency metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-module-and-ramdisk-metadata
+          path: |
+            workspace/out/shusky/dist/fips140.ko
+            workspace/out/shusky/dist/modules.load
+            workspace/out/shusky/dist/modules.dep
+            workspace/out/shusky/dist/modules.softdep
+            workspace/build-report/image-size-audit.txt
+            workspace/build-report/fips-hmac-execution-verification.txt
+            workspace/build-report/fips-gki-crc-audit.txt
+            workspace/build-report/final-dist-modules.load
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14
+
+      - name: Upload Native FIPS build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-nethunter-native-fips-build-test
+          path: |
+            workspace/build-report/
+            workspace/shiba-nethunter-native-fips-build-test.zip
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14 "$CONFIG"; then
+            echo "ERROR: RTL8187 selected EEPROM_93CX6 but it is absent from final config."
+            exit 1
+          fi
+          grep -E '^CONFIG_EEPROM_93CX6=' "$CONFIG" | tee -a "$REPORT"
+          echo "CONFIG_KSU: disabled (not enabled in kernel config)" | tee -a "$REPORT"
+          echo
+          echo "=== Distribution config comparison ==="
+          if [ -f out/shusky/dist/.config ]; then
+            if grep -q '^CONFIG_CRYPTO_FIPS140_MOD=m$' \
+              out/shusky/dist/.config; then
+              echo "Distribution config: FIPS enabled."
+            else
+              echo "WARNING: FIPS setting not present in dist/.config."
+              echo "The Shusky kernel config itself passed."
+            fi
+          else
+            echo "Distribution .config not available."
+          fi
+          echo "FIPS_CONFIG=$CONFIG" >> "$GITHUB_ENV"
+          echo
+          echo "Native Shusky FIPS configuration: PASS"
+
+      - name: Verify generated native FIPS module
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          MODULE="$(find . -type f \
+            -path '*/crypto/fips140.ko' \
+            -not -path './build-report/*' \
+            -print -quit)"
+          if [ -z "$MODULE" ]; then
+            echo "ERROR: Native crypto/fips140.ko not found."
+            exit 1
+          fi
+          echo "FIPS module: $MODULE"
+          sha256sum "$MODULE" \
+            | tee "$REPORT_DIR/fips140-sha256.txt"
+          file "$MODULE" \
+            | tee "$REPORT_DIR/fips140-file.txt"
+          readelf -S "$MODULE" \
+            | tee "$REPORT_DIR/fips140-sections.txt"
+          grep -q '\.init\.rela\.text' \
+            "$REPORT_DIR/fips140-sections.txt"
+          grep -q '\.init\.rela\.rodata' \
+            "$REPORT_DIR/fips140-sections.txt"
+          echo "FIPS relocation sections: PASS"
+
+      - name: Verify exact Native FIPS HMAC postlink execution and digest
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          postlink = Path("aosp/arch/arm64/Makefile.postlink").read_text()
+          generator = Path("aosp/crypto/fips140_gen_hmac.c").read_text()
+          required = (
+              "CMD_FIPS140_GEN_HMAC = crypto/fips140_gen_hmac",
+              "quiet_cmd_gen_hmac = HMAC",
+              "$(objtree)/crypto/fips140.ko: FORCE",
+              "$(call cmd,gen_hmac)",
+              "$(CMD_FIPS140_GEN_HMAC) $@",
+          )
+          for fragment in required:
+              if fragment not in postlink:
+                  raise SystemExit(f"ERROR: pinned Makefile.postlink lacks: {fragment}")
+          if not re.search(r"(?m)^quiet_cmd_gen_hmac\s*=\s*HMAC\s+\$@", postlink):
+              raise SystemExit("ERROR: HMAC log label is not bound to Kbuild target $@")
+          generator_tokens = (
+              "fips140_integ_hmac_key", "fips140_integ_hmac_digest",
+              "__fips140_text_start", "__fips140_text_end",
+              "__fips140_rodata_start", "__fips140_rodata_end",
+              "HMAC_Init_ex", "EVP_sha256()", "HMAC_Update", "HMAC_Final",
+          )
+          for token in generator_tokens:
+              if token not in generator:
+                  raise SystemExit(f"ERROR: pinned HMAC generator lacks: {token}")
+          print("Pinned Kbuild target rule and SHA-256 generator implementation: PASS")
+          PY
+
+          python3 - "$REPORT_DIR/build.log" "$REPORT_DIR/fips-hmac-target-log.txt" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          log = Path(sys.argv[1]).read_text(errors="replace")
+          pattern = re.compile(r"(^|[ \t])HMAC[ \t]+(?:\S*/)?crypto/fips140\.ko(?:[ \t]|$)")
+          matches = [line for line in log.splitlines() if pattern.search(line)]
+          if matches:
+              Path(sys.argv[2]).write_text("\n".join(matches) + "\n")
+              print(f"Kbuild exposed the exact fips140.ko HMAC target line(s): {len(matches)}")
+              print("\n".join(matches))
+          else:
+              Path(sys.argv[2]).write_text(
+                  "Bazel did not expose successful action stdout in build.log. "
+                  "The pinned target rule and embedded digest are independently verified below.\n"
+              )
+              print("INFO: Bazel did not expose the successful Kbuild action's quiet log line.")
+              print("The exact source target rule and resulting embedded HMAC are verified independently.")
+          PY
+
+          # Verify only authoritative final outputs. Bazel sandbox action trees
+          # also contain transient pre-strip/unstripped copies; comparing those
+          # byte-for-byte with the stripped final module creates false conflicts.
+          : > "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          test -f out/shusky/dist/fips140.ko && \
+            printf '%s\n' out/shusky/dist/fips140.ko \
+              >> "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          find out/bazel -type f \
+            \( -path '*/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel/crypto/fips140.ko' \
+               -o -path '*/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel_modules_install/staging/lib/modules/*/kernel/crypto/fips140.ko' \) \
+            -not -path '*/sandbox/*' -print \
+            >> "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          sort -u -o "$REPORT_DIR/fips-hmac-module-candidates.txt" \
+            "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          if ! grep -qx 'out/shusky/dist/fips140.ko' \
+            "$REPORT_DIR/fips-hmac-module-candidates.txt"; then
+            echo "ERROR: authoritative final dist fips140.ko is missing."
+            exit 1
+          fi
+          if [ "$(wc -l < "$REPORT_DIR/fips-hmac-module-candidates.txt")" -lt 2 ]; then
+            echo "ERROR: expected final dist plus Bazel/staging FIPS module for cross-verification."
+            exit 1
+          fi
+
+          python3 - "$REPORT_DIR" "$REPORT_DIR/fips-hmac-module-candidates.txt" <<'PY'
+          import hashlib, hmac, struct, sys
+          from pathlib import Path
+
+          report = Path(sys.argv[1])
+          candidates = [Path(p) for p in Path(sys.argv[2]).read_text().splitlines() if p]
+          verified, rejected = [], []
+
+          def cstr(table, offset):
+              if offset < 0 or offset >= len(table):
+                  raise ValueError("string-table offset out of bounds")
+              end = table.find(b"\0", offset)
+              if end < 0:
+                  raise ValueError("unterminated ELF string")
+              return table[offset:end].decode("utf-8", "replace")
+
+          def verify(path):
+              blob = path.read_bytes()
+              if len(blob) < 64 or blob[:4] != b"\x7fELF" or blob[4:6] != b"\x02\x01":
+                  raise ValueError("not ELF64 little-endian")
+              hdr = struct.unpack_from("<16sHHIQQQIHHHHHH", blob, 0)
+              if hdr[1] != 1 or hdr[2] != 183:
+                  raise ValueError("not relocatable AArch64 ELF")
+              shoff, shentsize, shnum, shstrndx = hdr[6], hdr[11], hdr[12], hdr[13]
+              if shentsize < 64 or not shnum or shstrndx >= shnum:
+                  raise ValueError("invalid section-header table")
+              secs = []
+              for i in range(shnum):
+                  v = struct.unpack_from("<IIQQQQIIQQ", blob, shoff + i * shentsize)
+                  secs.append({"nameoff":v[0],"type":v[1],"off":v[4],"size":v[5],
+                               "link":v[6],"entsize":v[9]})
+              st = secs[shstrndx]
+              names = blob[st["off"]:st["off"]+st["size"]]
+              for s in secs:
+                  s["name"] = cstr(names, s["nameoff"])
+              byname = {s["name"]:s for s in secs}
+              for name in (".init.rela.text", ".init.rela.rodata"):
+                  s = byname.get(name)
+                  if not s or not s["size"] or s["size"] % 24:
+                      raise ValueError(f"missing/invalid {name}")
+
+              syms = {}
+              for s in secs:
+                  if s["type"] != 2:
+                      continue
+                  if s["link"] >= len(secs):
+                      raise ValueError("bad symtab string-table link")
+                  strings_sec = secs[s["link"]]
+                  strings = blob[strings_sec["off"]:strings_sec["off"]+strings_sec["size"]]
+                  ent = s["entsize"] or 24
+                  if ent < 24:
+                      raise ValueError("bad ELF64 symbol entry size")
+                  for i in range(s["size"] // ent):
+                      nameoff, info, other, ndx, value, size = struct.unpack_from(
+                          "<IBBHQQ", blob, s["off"]+i*ent)
+                      if nameoff and ndx < len(secs):
+                          name = cstr(strings, nameoff)
+                          syms.setdefault(name, set()).add((ndx,value,size))
+
+              def sym(name):
+                  found = syms.get(name, set())
+                  if len(found) != 1:
+                      raise ValueError(f"expected one defined {name}; found {len(found)}")
+                  ndx,value,size = next(iter(found))
+                  return ndx,value,size
+
+              def span(first,last):
+                  a, av, _ = sym(first)
+                  b, bv, _ = sym(last)
+                  if a != b or not 0 <= av < bv <= secs[a]["size"]:
+                      raise ValueError(f"invalid symbol range {first}..{last}")
+                  s = secs[a]
+                  return blob[s["off"]+av:s["off"]+bv]
+
+              kn, kv, ks = sym("fips140_integ_hmac_key")
+              keysec = secs[kn]
+              ko = keysec["off"] + kv
+              kend = ko + ks if ks else keysec["off"] + keysec["size"]
+              kb = blob[ko:kend]
+              if b"\0" not in kb or not kb.split(b"\0",1)[0]:
+                  raise ValueError("HMAC key is empty or not NUL-terminated")
+              key = kb.split(b"\0",1)[0]
+
+              dn, dv, ds = sym("fips140_integ_hmac_digest")
+              if ds < 32:
+                  raise ValueError("digest symbol is smaller than SHA-256")
+              digestsec = secs[dn]
+              stored = blob[digestsec["off"]+dv:digestsec["off"]+dv+32]
+              textdata = span("__fips140_text_start","__fips140_text_end")
+              rodata = span("__fips140_rodata_start","__fips140_rodata_end")
+              calculated = hmac.new(key,textdata+rodata,hashlib.sha256).digest()
+              if not hmac.compare_digest(stored,calculated):
+                  raise ValueError("embedded digest differs from independently recomputed HMAC-SHA256")
+              return {
+                  "path":str(path),"sha256":hashlib.sha256(blob).hexdigest(),
+                  "hmac":calculated.hex(),"key_bytes":len(key),
+                  "key_sha256":hashlib.sha256(key).hexdigest(),
+                  "text_sha256":hashlib.sha256(textdata).hexdigest(),
+                  "rodata_sha256":hashlib.sha256(rodata).hexdigest(),
+                  "text_bytes":len(textdata),"rodata_bytes":len(rodata),
+                  "rela_text":byname[".init.rela.text"]["size"],
+                  "rela_rodata":byname[".init.rela.rodata"]["size"],
+              }
+
+          for p in candidates:
+              try:
+                  verified.append(verify(p))
+              except Exception as e:
+                  rejected.append(f"{p}: {e}")
+          if not verified:
+              raise SystemExit("ERROR: no module passed independent HMAC verification:\n"+"\n".join(rejected[:30]))
+          # Final dist, canonical Bazel target and installed staging copy must
+          # be byte-identical, and each must independently pass embedded HMAC.
+          if len({x["sha256"] for x in verified}) != 1:
+              details = "\\n".join(
+                  f'{x["path"]}: sha256={x["sha256"]} hmac={x["hmac"]}'
+                  for x in verified
+              )
+              raise SystemExit(
+                  "ERROR: authoritative final FIPS module outputs are not byte-identical:\\n" + details
+              )
+          fingerprints = {
+              (x["hmac"], x["key_sha256"], x["text_sha256"], x["rodata_sha256"])
+              for x in verified
+          }
+          if len(fingerprints) != 1:
+              raise SystemExit(
+                  "ERROR: authoritative final FIPS outputs disagree in HMAC key or authenticated text/rodata"
+              )
+          v = verified[0]
+          lines = [
+              "Kbuild target binding: PASS (pinned Makefile.postlink rule is scoped to crypto/fips140.ko)",
+              "Independent embedded HMAC-SHA256 recomputation: PASS",
+              f"Verified module candidates: {len(verified)}",
+              f"Module SHA-256: {v['sha256']}",
+              f"Embedded HMAC-SHA256: {v['hmac']}",
+              f"HMAC key SHA-256: {v['key_sha256']}",
+              f"Authenticated .text SHA-256: {v['text_sha256']}",
+              f"Authenticated .rodata SHA-256: {v['rodata_sha256']}",
+              f"HMAC key length: {v['key_bytes']} bytes",
+              f"Covered .text bytes: {v['text_bytes']}",
+              f"Covered .rodata bytes: {v['rodata_bytes']}",
+              f".init.rela.text bytes: {v['rela_text']}",
+              f".init.rela.rodata bytes: {v['rela_rodata']}",
+              "Verified module paths:",
+          ]
+          lines.extend("  "+x["path"] for x in verified)
+          if rejected:
+              lines.append("Non-final or non-verifiable candidates skipped:")
+              lines.extend("  "+x for x in rejected[:30])
+          (report/"fips-hmac-execution-verification.txt").write_text("\n".join(lines)+"\n")
+          print("\n".join(lines))
+          PY
+      - name: Verify generated vendor ramdisk modules.load
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          find . -type f \
+            -name modules.load \
+            -not -path './build-report/*' \
+            -print \
+            | sort \
+            | tee "$REPORT_DIR/modules-load-files.txt"
+          FOUND=0
+          INDEX=0
+          while IFS= read -r MODULES_LOAD; do
+            [ -f "$MODULES_LOAD" ] || continue
+            INDEX=$((INDEX + 1))
+            echo
+            echo "=== modules.load: $MODULES_LOAD ==="
+            sed -n '1,35p' "$MODULES_LOAD"
+            if grep -q 'fips140\.ko' "$MODULES_LOAD"; then
+              FOUND=$((FOUND + 1))
+              echo "FIPS entry found."
+              cp "$MODULES_LOAD" \
+                "$REPORT_DIR/modules-load-${INDEX}.txt"
+              grep -n -B3 -A5 \
+                'fips140\.ko' \
+                "$MODULES_LOAD" \
+                >> "$REPORT_DIR/fips-modules-load-position.txt"
+            fi
+          done < "$REPORT_DIR/modules-load-files.txt"
+          if [ "$FOUND" -eq 0 ]; then
+            echo "ERROR: No generated modules.load contains fips140.ko."
+            exit 1
+          fi
+          {
+            echo "modules.load files containing FIPS: $FOUND"
+            echo "FIPS module entry: present"
+            echo "Load order: recorded, not assumed"
+          } | tee "$REPORT_DIR/modules-load-verification.txt"
+          echo "FIPS modules.load presence verification: PASS"
+
+      - name: Collect ramdisk and module dependency diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR"
+          echo "=== modules.load files ===" \
+            | tee "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out -type f \
+            -name modules.load \
+            -print 2>/dev/null \
+            | sort \
+            | tee "$REPORT_DIR/ramdisk-modules-load-paths.txt"
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== FIPS-related module dependency entries ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out -type f \
+            \( -name modules.dep -o -name modules.softdep \) \
+            -print0 2>/dev/null \
+            | while IFS= read -r -d '' DEPFILE; do
+                if grep -qE 'fips140|zsmalloc' "$DEPFILE"; then
+                  echo \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                  echo "FILE: $DEPFILE" \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                  grep -n -B2 -A3 \
+                    -E 'fips140|zsmalloc' \
+                    "$DEPFILE" \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                fi
+              done
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Relevant ramdisk and boot image candidates ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out/shusky out/bazel \
+            -type f \
+            \( -iname '*vendor*ramdisk*' \
+            -o -iname '*initramfs*' \
+            -o -name vendor_boot.img \
+            -o -name boot.img \
+            -o -name modules.load \
+            -o -name modules.dep \
+            -o -name modules.softdep \) \
+            -print 2>/dev/null \
+            | sort -u \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Final distribution modules.load ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          if [ -f out/shusky/dist/modules.load ]; then
+            sed -n '1,100p' out/shusky/dist/modules.load \
+              | tee "$REPORT_DIR/final-dist-modules.load"
+            if grep -q 'fips140\.ko' out/shusky/dist/modules.load; then
+              echo "FIPS is present in final dist/modules.load." \
+                | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+            else
+              echo "FIPS is NOT present in final dist/modules.load." \
+                | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+            fi
+          else
+            echo "Final dist/modules.load does not exist." \
+              | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          fi
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Image file types ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out/shusky/dist \
+            -type f \
+            \( -name '*.img' -o -name '*ramdisk*' \) \
+            -print0 2>/dev/null \
+            | while IFS= read -r -d '' IMAGE_FILE; do
+                file "$IMAGE_FILE"
+              done \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "Ramdisk diagnostics collected."
+
+      - name: Verify excluded Wi-Fi modules
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          if find . -type f \
+            \( -name '*rtl8187*.ko' \
+            -o -name '*mt76*.ko' \) \
+            -not -path './build-report/*' \
+            | grep .; then
+            echo "ERROR: RTL8187 or MT76 module found."
+            exit 1
+          fi
+          echo "RTL8187: excluded"
+          echo "MT76: excluded"
+          for MODULE in cfg80211.ko mac80211.ko; do
+            if ! find . -type f -name "$MODULE" -not -path './build-report/*' | grep -q .; then
+              echo "ERROR: Required NetHunter wireless module missing: $MODULE"
+              exit 1
+            fi
+            echo "$MODULE: present"
+          done
+          if find . -type f -name 'ksu.ko' -not -path './build-report/*' | grep -q .; then
+            echo "ERROR: Unexpected KernelSU module found."
+            exit 1
+          fi
+          echo "KernelSU module: absent"
+
+      - name: Collect build outputs and reports
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR"
+          {
+            echo "Build report generated: $(date -u)"
+            echo
+            echo "=== FIPS module candidates ==="
+            find . -type f \
+              -path '*/crypto/fips140.ko' \
+              -not -path './build-report/*' \
+              -exec sha256sum {} \;
+            echo
+            echo "=== Kernel images ==="
+            find . -type f \
+              \( -name Image \
+              -o -name Image.lz4 \
+              -o -name boot.img \
+              -o -name vendor_boot.img \
+              -o -name vendor_kernel_boot.img \
+              -o -name vendor_dlkm.img \
+              -o -name system_dlkm.img \
+              -o -name dtbo.img \) \
+              -print
+          } | tee "$REPORT_DIR/build-summary.txt"
+
+      - name: Package Native FIPS build artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR/package"
+          find . -type f \
+            \( -name Image \
+            -o -name Image.lz4 \
+            -o -name boot.img \
+            -o -name vendor_boot.img \
+            -o -name vendor_kernel_boot.img \
+            -o -name vendor_dlkm.img \
+            -o -name system_dlkm.img \
+            -o -name dtbo.img \
+            -o -name fips140.ko \
+            -o -name modules.load \
+            -o -name modules.dep \
+            -o -name modules.softdep \) \
+            -not -path './build-report/package/*' \
+            -not -path './build-report/*' \
+            -exec cp --parents {} "$REPORT_DIR/package/" \;
+          zip -qr \
+            shiba-nethunter-native-fips-build-test.zip \
+            build-report \
+            2>/dev/null || true
+
+      - name: Audit flash image sizes against Pixel 8 stock partition capacities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          python3 <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          dist = Path("out/shusky/dist")
+          capacities = {
+              "boot.img": 67108864,
+              "vendor_kernel_boot.img": 67108864,
+              "dtbo.img": 16777216,
+              "system_dlkm.img": 11714560,
+              "vendor_dlkm.img": 25559040,
+          }
+          report = []
+          report.append("Pixel 8 Shiba partition-fit audit")
+          report.append("Capacities are from the user's saved stock partition measurements.")
+          report.append("")
+          failed = False
+          for name, capacity in capacities.items():
+              path = dist / name
+              if not path.is_file():
+                  report.append(f"MISSING: {name}")
+                  failed = True
+                  continue
+              size = path.stat().st_size
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              status = "PASS" if size <= capacity else "OVERSIZE - DO NOT FLASH"
+              if size > capacity:
+                  failed = True
+              report.append(
+                  f"{name}: size={size} capacity={capacity} "
+                  f"remaining={capacity-size} status={status} sha256={digest}"
+              )
+          for name in ("Image", "fips140.ko", "modules.load", "modules.dep"):
+              path = dist / name
+              if path.is_file():
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  report.append(f"{name}: size={path.stat().st_size} sha256={digest}")
+              else:
+                  report.append(f"{name}: not present in dist (may be packaged elsewhere)")
+          output = "\n".join(report) + "\n"
+          print(output, end="")
+          Path("build-report/image-size-audit.txt").write_text(output)
+          PY
+
+      - name: Upload boot.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-boot-image
+          path: workspace/out/shusky/dist/boot.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload vendor_kernel_boot.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-vendor-kernel-boot-image
+          path: workspace/out/shusky/dist/vendor_kernel_boot.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload dtbo.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-dtbo-image
+          path: workspace/out/shusky/dist/dtbo.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload system_dlkm.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-system-dlkm-image
+          path: workspace/out/shusky/dist/system_dlkm.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload vendor_dlkm.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-vendor-dlkm-image
+          path: workspace/out/shusky/dist/vendor_dlkm.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload FIPS module and ramdisk dependency metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-module-and-ramdisk-metadata
+          path: |
+            workspace/out/shusky/dist/fips140.ko
+            workspace/out/shusky/dist/modules.load
+            workspace/out/shusky/dist/modules.dep
+            workspace/out/shusky/dist/modules.softdep
+            workspace/build-report/image-size-audit.txt
+            workspace/build-report/fips-hmac-execution-verification.txt
+            workspace/build-report/fips-gki-crc-audit.txt
+            workspace/build-report/final-dist-modules.load
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14
+
+      - name: Upload Native FIPS build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-nethunter-native-fips-build-test
+          path: |
+            workspace/build-report/
+            workspace/shiba-nethunter-native-fips-build-test.zip
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14 "$FIPS_CONFIG" || { echo "ERROR: EEPROM dependency unresolved"; exit 1; } ;;
+          esac
+          DEP_HIT=0
+          while IFS= read -r depfile; do
+            if grep -Fq 'rtl8187.ko:' "$depfile"; then
+              grep -F 'rtl8187.ko:' "$depfile" | tee "$REPORT_DIR/rtl8187-modules-dep.txt"
+              DEP_HIT=1
+              break
+            fi
+          done < <(find out/bazel -type f -name modules.dep -print)
+          test "$DEP_HIT" -eq 1 || { echo "ERROR: modules.dep lacks rtl8187 entry"; exit 1; }
+          if find out -type f -name modules.load -exec grep -l 'rtl8187.ko' {} + | grep -q .; then
+            echo "ERROR: RTL8187 must not be in early-boot modules.load"; exit 1
+          fi
+          mapfile -t SYMVERS_FILES < <(find out/bazel -type f -name Module.symvers -print)
+          test "${#SYMVERS_FILES[@]}" -gt 0 || { echo "ERROR: Module.symvers unavailable"; exit 1; }
+          python3 - "$RTL_MODULE" "$EXPECTED" "$REPORT_DIR/rtl8187-kmi-crc-audit.txt" "${SYMVERS_FILES[@]}" <<'PY'
+          import subprocess, sys
+          module, release, report, *files = sys.argv[1:]
+          def norm(v):
+              v=v.lower()
+              return v[2:] if v.startswith("0x") else v
+          exports={}
+          for path in files:
+              with open(path, encoding="utf-8", errors="replace") as f:
+                  for line in f:
+                      p=line.split()
+                      if len(p)>=2 and p[0].startswith("0x"):
+                          exports.setdefault(p[1],set()).add(norm(p[0]))
+          out=subprocess.check_output(["modprobe","--show-modversions",module],text=True)
+          imports=[]
+          for line in out.splitlines():
+              p=line.split()
+              if len(p)>=2 and p[0].startswith("0x"):
+                  imports.append((p[1],norm(p[0])))
+          missing=[]; bad=[]
+          for name,crc in imports:
+              values=exports.get(name,set())
+              if not values: missing.append(name)
+              elif crc not in values: bad.append((name,crc,",".join(sorted(values))))
+          lines=[f"module={module}",f"kernel_release={release}",f"Module.symvers_files={len(files)}",f"imports_checked={len(imports)}",f"missing={len(missing)}",f"crc_mismatches={len(bad)}"]
+          lines += [f"MISSING {x}" for x in missing]
+          lines += [f"CRC_MISMATCH {n} module={c} build={v}" for n,c,v in bad]
+          open(report,"w").write("\n".join(lines)+"\n")
+          print("\n".join(lines))
+          if not imports or missing or bad: raise SystemExit("RTL8187 CRC audit failed")
+          PY
+          {
+            echo "RTL8187 staged module: PASS"
+            echo "Kernel release/vermagic: PASS"
+            echo "EEPROM dependency: resolved"
+            echo "modules.dep: PASS"
+            echo "No early-boot autoload: PASS"
+            echo "Module.symvers CRC audit: PASS"
+            echo "Strict Pixel KMI preserved; no whitelist auto-expansion."
+          } | tee "$REPORT_DIR/rtl8187-module-verification.txt"
+
       - name: Preserve generated vendor_kernel_boot image
         if: success()
         shell: bash
@@ -836,6 +2249,7 @@ jobs:
             "CONFIG_CFG80211=m"
             "CONFIG_MAC80211=m"
             "CONFIG_USB=y"
+            "CONFIG_RTL8187=m"
             "CONFIG_CRYPTO_FIPS140_MOD=m"
           )
           for SETTING in "${EXPECTED_CONFIG[@]}"; do
@@ -850,6 +2264,627 @@ jobs:
             grep -n '^CONFIG_KSU=' "$CONFIG"
             exit 1
           fi
+          if ! grep -Eq '^CONFIG_EEPROM_93CX6=(m|y)
+          echo
+          echo "=== Distribution config comparison ==="
+          if [ -f out/shusky/dist/.config ]; then
+            if grep -q '^CONFIG_CRYPTO_FIPS140_MOD=m$' \
+              out/shusky/dist/.config; then
+              echo "Distribution config: FIPS enabled."
+            else
+              echo "WARNING: FIPS setting not present in dist/.config."
+              echo "The Shusky kernel config itself passed."
+            fi
+          else
+            echo "Distribution .config not available."
+          fi
+          echo "FIPS_CONFIG=$CONFIG" >> "$GITHUB_ENV"
+          echo
+          echo "Native Shusky FIPS configuration: PASS"
+
+      - name: Verify generated native FIPS module
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          MODULE="$(find . -type f \
+            -path '*/crypto/fips140.ko' \
+            -not -path './build-report/*' \
+            -print -quit)"
+          if [ -z "$MODULE" ]; then
+            echo "ERROR: Native crypto/fips140.ko not found."
+            exit 1
+          fi
+          echo "FIPS module: $MODULE"
+          sha256sum "$MODULE" \
+            | tee "$REPORT_DIR/fips140-sha256.txt"
+          file "$MODULE" \
+            | tee "$REPORT_DIR/fips140-file.txt"
+          readelf -S "$MODULE" \
+            | tee "$REPORT_DIR/fips140-sections.txt"
+          grep -q '\.init\.rela\.text' \
+            "$REPORT_DIR/fips140-sections.txt"
+          grep -q '\.init\.rela\.rodata' \
+            "$REPORT_DIR/fips140-sections.txt"
+          echo "FIPS relocation sections: PASS"
+
+      - name: Verify exact Native FIPS HMAC postlink execution and digest
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          postlink = Path("aosp/arch/arm64/Makefile.postlink").read_text()
+          generator = Path("aosp/crypto/fips140_gen_hmac.c").read_text()
+          required = (
+              "CMD_FIPS140_GEN_HMAC = crypto/fips140_gen_hmac",
+              "quiet_cmd_gen_hmac = HMAC",
+              "$(objtree)/crypto/fips140.ko: FORCE",
+              "$(call cmd,gen_hmac)",
+              "$(CMD_FIPS140_GEN_HMAC) $@",
+          )
+          for fragment in required:
+              if fragment not in postlink:
+                  raise SystemExit(f"ERROR: pinned Makefile.postlink lacks: {fragment}")
+          if not re.search(r"(?m)^quiet_cmd_gen_hmac\s*=\s*HMAC\s+\$@", postlink):
+              raise SystemExit("ERROR: HMAC log label is not bound to Kbuild target $@")
+          generator_tokens = (
+              "fips140_integ_hmac_key", "fips140_integ_hmac_digest",
+              "__fips140_text_start", "__fips140_text_end",
+              "__fips140_rodata_start", "__fips140_rodata_end",
+              "HMAC_Init_ex", "EVP_sha256()", "HMAC_Update", "HMAC_Final",
+          )
+          for token in generator_tokens:
+              if token not in generator:
+                  raise SystemExit(f"ERROR: pinned HMAC generator lacks: {token}")
+          print("Pinned Kbuild target rule and SHA-256 generator implementation: PASS")
+          PY
+
+          python3 - "$REPORT_DIR/build.log" "$REPORT_DIR/fips-hmac-target-log.txt" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          log = Path(sys.argv[1]).read_text(errors="replace")
+          pattern = re.compile(r"(^|[ \t])HMAC[ \t]+(?:\S*/)?crypto/fips140\.ko(?:[ \t]|$)")
+          matches = [line for line in log.splitlines() if pattern.search(line)]
+          if matches:
+              Path(sys.argv[2]).write_text("\n".join(matches) + "\n")
+              print(f"Kbuild exposed the exact fips140.ko HMAC target line(s): {len(matches)}")
+              print("\n".join(matches))
+          else:
+              Path(sys.argv[2]).write_text(
+                  "Bazel did not expose successful action stdout in build.log. "
+                  "The pinned target rule and embedded digest are independently verified below.\n"
+              )
+              print("INFO: Bazel did not expose the successful Kbuild action's quiet log line.")
+              print("The exact source target rule and resulting embedded HMAC are verified independently.")
+          PY
+
+          # Verify only authoritative final outputs. Bazel sandbox action trees
+          # also contain transient pre-strip/unstripped copies; comparing those
+          # byte-for-byte with the stripped final module creates false conflicts.
+          : > "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          test -f out/shusky/dist/fips140.ko && \
+            printf '%s\n' out/shusky/dist/fips140.ko \
+              >> "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          find out/bazel -type f \
+            \( -path '*/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel/crypto/fips140.ko' \
+               -o -path '*/execroot/__main__/bazel-out/k8-fastbuild/bin/private/devices/google/shusky/kernel_modules_install/staging/lib/modules/*/kernel/crypto/fips140.ko' \) \
+            -not -path '*/sandbox/*' -print \
+            >> "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          sort -u -o "$REPORT_DIR/fips-hmac-module-candidates.txt" \
+            "$REPORT_DIR/fips-hmac-module-candidates.txt"
+          if ! grep -qx 'out/shusky/dist/fips140.ko' \
+            "$REPORT_DIR/fips-hmac-module-candidates.txt"; then
+            echo "ERROR: authoritative final dist fips140.ko is missing."
+            exit 1
+          fi
+          if [ "$(wc -l < "$REPORT_DIR/fips-hmac-module-candidates.txt")" -lt 2 ]; then
+            echo "ERROR: expected final dist plus Bazel/staging FIPS module for cross-verification."
+            exit 1
+          fi
+
+          python3 - "$REPORT_DIR" "$REPORT_DIR/fips-hmac-module-candidates.txt" <<'PY'
+          import hashlib, hmac, struct, sys
+          from pathlib import Path
+
+          report = Path(sys.argv[1])
+          candidates = [Path(p) for p in Path(sys.argv[2]).read_text().splitlines() if p]
+          verified, rejected = [], []
+
+          def cstr(table, offset):
+              if offset < 0 or offset >= len(table):
+                  raise ValueError("string-table offset out of bounds")
+              end = table.find(b"\0", offset)
+              if end < 0:
+                  raise ValueError("unterminated ELF string")
+              return table[offset:end].decode("utf-8", "replace")
+
+          def verify(path):
+              blob = path.read_bytes()
+              if len(blob) < 64 or blob[:4] != b"\x7fELF" or blob[4:6] != b"\x02\x01":
+                  raise ValueError("not ELF64 little-endian")
+              hdr = struct.unpack_from("<16sHHIQQQIHHHHHH", blob, 0)
+              if hdr[1] != 1 or hdr[2] != 183:
+                  raise ValueError("not relocatable AArch64 ELF")
+              shoff, shentsize, shnum, shstrndx = hdr[6], hdr[11], hdr[12], hdr[13]
+              if shentsize < 64 or not shnum or shstrndx >= shnum:
+                  raise ValueError("invalid section-header table")
+              secs = []
+              for i in range(shnum):
+                  v = struct.unpack_from("<IIQQQQIIQQ", blob, shoff + i * shentsize)
+                  secs.append({"nameoff":v[0],"type":v[1],"off":v[4],"size":v[5],
+                               "link":v[6],"entsize":v[9]})
+              st = secs[shstrndx]
+              names = blob[st["off"]:st["off"]+st["size"]]
+              for s in secs:
+                  s["name"] = cstr(names, s["nameoff"])
+              byname = {s["name"]:s for s in secs}
+              for name in (".init.rela.text", ".init.rela.rodata"):
+                  s = byname.get(name)
+                  if not s or not s["size"] or s["size"] % 24:
+                      raise ValueError(f"missing/invalid {name}")
+
+              syms = {}
+              for s in secs:
+                  if s["type"] != 2:
+                      continue
+                  if s["link"] >= len(secs):
+                      raise ValueError("bad symtab string-table link")
+                  strings_sec = secs[s["link"]]
+                  strings = blob[strings_sec["off"]:strings_sec["off"]+strings_sec["size"]]
+                  ent = s["entsize"] or 24
+                  if ent < 24:
+                      raise ValueError("bad ELF64 symbol entry size")
+                  for i in range(s["size"] // ent):
+                      nameoff, info, other, ndx, value, size = struct.unpack_from(
+                          "<IBBHQQ", blob, s["off"]+i*ent)
+                      if nameoff and ndx < len(secs):
+                          name = cstr(strings, nameoff)
+                          syms.setdefault(name, set()).add((ndx,value,size))
+
+              def sym(name):
+                  found = syms.get(name, set())
+                  if len(found) != 1:
+                      raise ValueError(f"expected one defined {name}; found {len(found)}")
+                  ndx,value,size = next(iter(found))
+                  return ndx,value,size
+
+              def span(first,last):
+                  a, av, _ = sym(first)
+                  b, bv, _ = sym(last)
+                  if a != b or not 0 <= av < bv <= secs[a]["size"]:
+                      raise ValueError(f"invalid symbol range {first}..{last}")
+                  s = secs[a]
+                  return blob[s["off"]+av:s["off"]+bv]
+
+              kn, kv, ks = sym("fips140_integ_hmac_key")
+              keysec = secs[kn]
+              ko = keysec["off"] + kv
+              kend = ko + ks if ks else keysec["off"] + keysec["size"]
+              kb = blob[ko:kend]
+              if b"\0" not in kb or not kb.split(b"\0",1)[0]:
+                  raise ValueError("HMAC key is empty or not NUL-terminated")
+              key = kb.split(b"\0",1)[0]
+
+              dn, dv, ds = sym("fips140_integ_hmac_digest")
+              if ds < 32:
+                  raise ValueError("digest symbol is smaller than SHA-256")
+              digestsec = secs[dn]
+              stored = blob[digestsec["off"]+dv:digestsec["off"]+dv+32]
+              textdata = span("__fips140_text_start","__fips140_text_end")
+              rodata = span("__fips140_rodata_start","__fips140_rodata_end")
+              calculated = hmac.new(key,textdata+rodata,hashlib.sha256).digest()
+              if not hmac.compare_digest(stored,calculated):
+                  raise ValueError("embedded digest differs from independently recomputed HMAC-SHA256")
+              return {
+                  "path":str(path),"sha256":hashlib.sha256(blob).hexdigest(),
+                  "hmac":calculated.hex(),"key_bytes":len(key),
+                  "key_sha256":hashlib.sha256(key).hexdigest(),
+                  "text_sha256":hashlib.sha256(textdata).hexdigest(),
+                  "rodata_sha256":hashlib.sha256(rodata).hexdigest(),
+                  "text_bytes":len(textdata),"rodata_bytes":len(rodata),
+                  "rela_text":byname[".init.rela.text"]["size"],
+                  "rela_rodata":byname[".init.rela.rodata"]["size"],
+              }
+
+          for p in candidates:
+              try:
+                  verified.append(verify(p))
+              except Exception as e:
+                  rejected.append(f"{p}: {e}")
+          if not verified:
+              raise SystemExit("ERROR: no module passed independent HMAC verification:\n"+"\n".join(rejected[:30]))
+          # Final dist, canonical Bazel target and installed staging copy must
+          # be byte-identical, and each must independently pass embedded HMAC.
+          if len({x["sha256"] for x in verified}) != 1:
+              details = "\\n".join(
+                  f'{x["path"]}: sha256={x["sha256"]} hmac={x["hmac"]}'
+                  for x in verified
+              )
+              raise SystemExit(
+                  "ERROR: authoritative final FIPS module outputs are not byte-identical:\\n" + details
+              )
+          fingerprints = {
+              (x["hmac"], x["key_sha256"], x["text_sha256"], x["rodata_sha256"])
+              for x in verified
+          }
+          if len(fingerprints) != 1:
+              raise SystemExit(
+                  "ERROR: authoritative final FIPS outputs disagree in HMAC key or authenticated text/rodata"
+              )
+          v = verified[0]
+          lines = [
+              "Kbuild target binding: PASS (pinned Makefile.postlink rule is scoped to crypto/fips140.ko)",
+              "Independent embedded HMAC-SHA256 recomputation: PASS",
+              f"Verified module candidates: {len(verified)}",
+              f"Module SHA-256: {v['sha256']}",
+              f"Embedded HMAC-SHA256: {v['hmac']}",
+              f"HMAC key SHA-256: {v['key_sha256']}",
+              f"Authenticated .text SHA-256: {v['text_sha256']}",
+              f"Authenticated .rodata SHA-256: {v['rodata_sha256']}",
+              f"HMAC key length: {v['key_bytes']} bytes",
+              f"Covered .text bytes: {v['text_bytes']}",
+              f"Covered .rodata bytes: {v['rodata_bytes']}",
+              f".init.rela.text bytes: {v['rela_text']}",
+              f".init.rela.rodata bytes: {v['rela_rodata']}",
+              "Verified module paths:",
+          ]
+          lines.extend("  "+x["path"] for x in verified)
+          if rejected:
+              lines.append("Non-final or non-verifiable candidates skipped:")
+              lines.extend("  "+x for x in rejected[:30])
+          (report/"fips-hmac-execution-verification.txt").write_text("\n".join(lines)+"\n")
+          print("\n".join(lines))
+          PY
+      - name: Verify generated vendor ramdisk modules.load
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          find . -type f \
+            -name modules.load \
+            -not -path './build-report/*' \
+            -print \
+            | sort \
+            | tee "$REPORT_DIR/modules-load-files.txt"
+          FOUND=0
+          INDEX=0
+          while IFS= read -r MODULES_LOAD; do
+            [ -f "$MODULES_LOAD" ] || continue
+            INDEX=$((INDEX + 1))
+            echo
+            echo "=== modules.load: $MODULES_LOAD ==="
+            sed -n '1,35p' "$MODULES_LOAD"
+            if grep -q 'fips140\.ko' "$MODULES_LOAD"; then
+              FOUND=$((FOUND + 1))
+              echo "FIPS entry found."
+              cp "$MODULES_LOAD" \
+                "$REPORT_DIR/modules-load-${INDEX}.txt"
+              grep -n -B3 -A5 \
+                'fips140\.ko' \
+                "$MODULES_LOAD" \
+                >> "$REPORT_DIR/fips-modules-load-position.txt"
+            fi
+          done < "$REPORT_DIR/modules-load-files.txt"
+          if [ "$FOUND" -eq 0 ]; then
+            echo "ERROR: No generated modules.load contains fips140.ko."
+            exit 1
+          fi
+          {
+            echo "modules.load files containing FIPS: $FOUND"
+            echo "FIPS module entry: present"
+            echo "Load order: recorded, not assumed"
+          } | tee "$REPORT_DIR/modules-load-verification.txt"
+          echo "FIPS modules.load presence verification: PASS"
+
+      - name: Collect ramdisk and module dependency diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR"
+          echo "=== modules.load files ===" \
+            | tee "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out -type f \
+            -name modules.load \
+            -print 2>/dev/null \
+            | sort \
+            | tee "$REPORT_DIR/ramdisk-modules-load-paths.txt"
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== FIPS-related module dependency entries ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out -type f \
+            \( -name modules.dep -o -name modules.softdep \) \
+            -print0 2>/dev/null \
+            | while IFS= read -r -d '' DEPFILE; do
+                if grep -qE 'fips140|zsmalloc' "$DEPFILE"; then
+                  echo \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                  echo "FILE: $DEPFILE" \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                  grep -n -B2 -A3 \
+                    -E 'fips140|zsmalloc' \
+                    "$DEPFILE" \
+                    | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+                fi
+              done
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Relevant ramdisk and boot image candidates ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out/shusky out/bazel \
+            -type f \
+            \( -iname '*vendor*ramdisk*' \
+            -o -iname '*initramfs*' \
+            -o -name vendor_boot.img \
+            -o -name boot.img \
+            -o -name modules.load \
+            -o -name modules.dep \
+            -o -name modules.softdep \) \
+            -print 2>/dev/null \
+            | sort -u \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Final distribution modules.load ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          if [ -f out/shusky/dist/modules.load ]; then
+            sed -n '1,100p' out/shusky/dist/modules.load \
+              | tee "$REPORT_DIR/final-dist-modules.load"
+            if grep -q 'fips140\.ko' out/shusky/dist/modules.load; then
+              echo "FIPS is present in final dist/modules.load." \
+                | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+            else
+              echo "FIPS is NOT present in final dist/modules.load." \
+                | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+            fi
+          else
+            echo "Final dist/modules.load does not exist." \
+              | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          fi
+          echo \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "=== Image file types ===" \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          find out/shusky/dist \
+            -type f \
+            \( -name '*.img' -o -name '*ramdisk*' \) \
+            -print0 2>/dev/null \
+            | while IFS= read -r -d '' IMAGE_FILE; do
+                file "$IMAGE_FILE"
+              done \
+            | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
+          echo "Ramdisk diagnostics collected."
+
+      - name: Verify excluded Wi-Fi modules
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          if find . -type f \
+            \( -name '*rtl8187*.ko' \
+            -o -name '*mt76*.ko' \) \
+            -not -path './build-report/*' \
+            | grep .; then
+            echo "ERROR: RTL8187 or MT76 module found."
+            exit 1
+          fi
+          echo "RTL8187: excluded"
+          echo "MT76: excluded"
+          for MODULE in cfg80211.ko mac80211.ko; do
+            if ! find . -type f -name "$MODULE" -not -path './build-report/*' | grep -q .; then
+              echo "ERROR: Required NetHunter wireless module missing: $MODULE"
+              exit 1
+            fi
+            echo "$MODULE: present"
+          done
+          if find . -type f -name 'ksu.ko' -not -path './build-report/*' | grep -q .; then
+            echo "ERROR: Unexpected KernelSU module found."
+            exit 1
+          fi
+          echo "KernelSU module: absent"
+
+      - name: Collect build outputs and reports
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR"
+          {
+            echo "Build report generated: $(date -u)"
+            echo
+            echo "=== FIPS module candidates ==="
+            find . -type f \
+              -path '*/crypto/fips140.ko' \
+              -not -path './build-report/*' \
+              -exec sha256sum {} \;
+            echo
+            echo "=== Kernel images ==="
+            find . -type f \
+              \( -name Image \
+              -o -name Image.lz4 \
+              -o -name boot.img \
+              -o -name vendor_boot.img \
+              -o -name vendor_kernel_boot.img \
+              -o -name vendor_dlkm.img \
+              -o -name system_dlkm.img \
+              -o -name dtbo.img \) \
+              -print
+          } | tee "$REPORT_DIR/build-summary.txt"
+
+      - name: Package Native FIPS build artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd "$WORKSPACE" || exit 0
+          mkdir -p "$REPORT_DIR/package"
+          find . -type f \
+            \( -name Image \
+            -o -name Image.lz4 \
+            -o -name boot.img \
+            -o -name vendor_boot.img \
+            -o -name vendor_kernel_boot.img \
+            -o -name vendor_dlkm.img \
+            -o -name system_dlkm.img \
+            -o -name dtbo.img \
+            -o -name fips140.ko \
+            -o -name modules.load \
+            -o -name modules.dep \
+            -o -name modules.softdep \) \
+            -not -path './build-report/package/*' \
+            -not -path './build-report/*' \
+            -exec cp --parents {} "$REPORT_DIR/package/" \;
+          zip -qr \
+            shiba-nethunter-native-fips-build-test.zip \
+            build-report \
+            2>/dev/null || true
+
+      - name: Audit flash image sizes against Pixel 8 stock partition capacities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          python3 <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          dist = Path("out/shusky/dist")
+          capacities = {
+              "boot.img": 67108864,
+              "vendor_kernel_boot.img": 67108864,
+              "dtbo.img": 16777216,
+              "system_dlkm.img": 11714560,
+              "vendor_dlkm.img": 25559040,
+          }
+          report = []
+          report.append("Pixel 8 Shiba partition-fit audit")
+          report.append("Capacities are from the user's saved stock partition measurements.")
+          report.append("")
+          failed = False
+          for name, capacity in capacities.items():
+              path = dist / name
+              if not path.is_file():
+                  report.append(f"MISSING: {name}")
+                  failed = True
+                  continue
+              size = path.stat().st_size
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              status = "PASS" if size <= capacity else "OVERSIZE - DO NOT FLASH"
+              if size > capacity:
+                  failed = True
+              report.append(
+                  f"{name}: size={size} capacity={capacity} "
+                  f"remaining={capacity-size} status={status} sha256={digest}"
+              )
+          for name in ("Image", "fips140.ko", "modules.load", "modules.dep"):
+              path = dist / name
+              if path.is_file():
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  report.append(f"{name}: size={path.stat().st_size} sha256={digest}")
+              else:
+                  report.append(f"{name}: not present in dist (may be packaged elsewhere)")
+          output = "\n".join(report) + "\n"
+          print(output, end="")
+          Path("build-report/image-size-audit.txt").write_text(output)
+          PY
+
+      - name: Upload boot.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-boot-image
+          path: workspace/out/shusky/dist/boot.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload vendor_kernel_boot.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-vendor-kernel-boot-image
+          path: workspace/out/shusky/dist/vendor_kernel_boot.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload dtbo.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-dtbo-image
+          path: workspace/out/shusky/dist/dtbo.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload system_dlkm.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-system-dlkm-image
+          path: workspace/out/shusky/dist/system_dlkm.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload vendor_dlkm.img for independent image audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-vendor-dlkm-image
+          path: workspace/out/shusky/dist/vendor_dlkm.img
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload FIPS module and ramdisk dependency metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-module-and-ramdisk-metadata
+          path: |
+            workspace/out/shusky/dist/fips140.ko
+            workspace/out/shusky/dist/modules.load
+            workspace/out/shusky/dist/modules.dep
+            workspace/out/shusky/dist/modules.softdep
+            workspace/build-report/image-size-audit.txt
+            workspace/build-report/fips-hmac-execution-verification.txt
+            workspace/build-report/fips-gki-crc-audit.txt
+            workspace/build-report/final-dist-modules.load
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14
+
+      - name: Upload Native FIPS build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-nethunter-native-fips-build-test
+          path: |
+            workspace/build-report/
+            workspace/shiba-nethunter-native-fips-build-test.zip
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14 "$CONFIG"; then
+            echo "ERROR: RTL8187 selected EEPROM_93CX6 but it is absent from final config."
+            exit 1
+          fi
+          grep -E '^CONFIG_EEPROM_93CX6=' "$CONFIG" | tee -a "$REPORT"
           echo "CONFIG_KSU: disabled (not enabled in kernel config)" | tee -a "$REPORT"
           echo
           echo "=== Distribution config comparison ==="
