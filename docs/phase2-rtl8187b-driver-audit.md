@@ -57,3 +57,8 @@ The first CI test build did not reach compilation. Kleaf's config validator reje
 The first run used the earlier, incorrect module output path. The corrected path is `drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko`. The workflow preflight now rejects the old path and checks Bash script syntax plus workflow YAML before spending time on a kernel build.
 
 Final image validation is fail-closed: the audit extracts both ext4 DLKM images, proves the RTL8187 and EEPROM module bytes are present in the image and identical to the audited staged files, verifies same-tree dependency metadata, USB alias, exact vermagic, and rejects early-boot autoload or blocklisting. Required artifacts may not be missing during packaging or upload.
+
+
+## Strict verification run
+
+A new isolated CI run is authorized after the Realtek parent-menu correction and fail-closed audit changes. This run must pass the source/Kconfig preflight, merged-config checks, exact module output and dependency audits, strict Pixel KMI, pinned GKI CRC checks, FIPS/UFS load-order checks, ext4 DLKM image extraction and module hash comparison, partition-capacity checks, and verified artifact packaging. A failure at any gate rejects the artifact. No phone flashing is part of this workflow.
