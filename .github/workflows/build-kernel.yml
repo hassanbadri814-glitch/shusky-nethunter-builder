@@ -795,7 +795,7 @@ jobs:
           set -euo pipefail
           cd "$WORKSPACE"
           tools/bazel run \
-            --repo_manifest "$(realpath out/manifest.xml)" \
+            --repo_manifest "$(realpath .):$(realpath out/manifest.xml)" \
             --workspace_status_command="$GITHUB_WORKSPACE/scripts/kleaf-prebuilt-gki-status.sh" \
             --config=stamp \
             --config=shusky \
