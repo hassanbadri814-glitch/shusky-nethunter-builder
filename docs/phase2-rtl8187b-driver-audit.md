@@ -39,7 +39,8 @@ The Bazel/Kleaf strict Pixel KMI gate is authoritative. A symbol that is not par
 ## Current status
 
 - Repository integration: implemented on this branch.
-- Test build: pending.
+- First strict CI run `44427195189`: rejected by the Pixel KMI gate; no build artifact was accepted.
+- Follow-up ABI/source compatibility route: implemented in the branch; awaiting the next CI result.
 - Build artifact: not yet produced.
 - Pixel 8 USB/monitor/injection test: not yet performed.
 - Phone flash or partition change: none.
