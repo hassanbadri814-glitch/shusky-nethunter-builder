@@ -461,6 +461,28 @@ jobs:
           PY
           echo "GKI prebuilt target routing patch: PASS"
 
+      - name: Verify pinned RTL8187 and EEPROM source integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          RTL_DIR="aosp/drivers/net/wireless/realtek/rtl818x/rtl8187"
+          RTL_KCONFIG="aosp/drivers/net/wireless/realtek/rtl818x/Kconfig"
+          test -s "$RTL_DIR/Makefile"
+          test -s "$RTL_DIR/dev.c"
+          test -s "$RTL_KCONFIG"
+          grep -Eq 'config RTL8187([[:space:]]|$)' "$RTL_KCONFIG"
+          grep -Eq 'select EEPROM_93CX6' "$RTL_KCONFIG"
+          grep -Eq 'obj-\$\(CONFIG_RTL8187\).*rtl8187\.o' "$RTL_DIR/Makefile"
+          test -s aosp/drivers/misc/eeprom/93cx6.c
+          test -s aosp/drivers/misc/eeprom/Makefile
+          {
+            echo "RTL8187 source directory: $RTL_DIR"
+            echo "RTL8187 Kconfig selects EEPROM_93CX6: PASS"
+            echo "RTL8187 Makefile builds rtl8187.o: PASS"
+            echo "EEPROM_93CX6 source and Makefile: PASS"
+          } | tee "$REPORT_DIR/rtl8187-source-verification.txt"
+
       - name: Create native FIPS defconfig fragment
         shell: bash
         run: |
@@ -475,6 +497,7 @@ jobs:
           CONFIG_MAC80211=m
           CONFIG_USB=y
           CONFIG_RTL8187=m
+          CONFIG_EEPROM_93CX6=m
           CONFIG_CRYPTO_FIPS140_MOD=m
           EOF
           echo "=== FIPS defconfig ==="
@@ -535,7 +558,7 @@ jobs:
               )
           required_module_outs = [
               "crypto/fips140.ko",
-              "drivers/net/wireless/realtek/rtl8187/rtl8187.ko",
+              "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
               "drivers/misc/eeprom/eeprom_93cx6.ko",
           ]
           if not all(f'"{item}"' in text for item in required_module_outs):
@@ -546,7 +569,7 @@ jobs:
                   old,
                   'module_outs = ZUMA_MODULE_OUTS + '
                   '["crypto/fips140.ko", '
-                  '"drivers/net/wireless/realtek/rtl8187/rtl8187.ko", '
+                  '"drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko", '
                   '"drivers/misc/eeprom/eeprom_93cx6.ko"],',
                   1
               )
@@ -846,6 +869,7 @@ jobs:
             "CONFIG_MAC80211=m"
             "CONFIG_USB=y"
             "CONFIG_RTL8187=m"
+            "CONFIG_EEPROM_93CX6=m"
             "CONFIG_CRYPTO_FIPS140_MOD=m"
           )
           for SETTING in "${EXPECTED_CONFIG[@]}"; do
@@ -1297,7 +1321,7 @@ jobs:
         run: |
           set -euo pipefail
           bash "$GITHUB_WORKSPACE/scripts/audit-rtl8187.sh" \
-            "$WORKSPACE" "$EXPECTED_KERNEL_RELEASE" "$REPORT_DIR" "$FIPS_CONFIG"
+            "$WORKSPACE" "$EXPECTED_KERNEL_RELEASE" "$REPORT_DIR" "$FIPS_CONFIG" "14691759"
 
       - name: Collect build outputs and reports
         if: always()
