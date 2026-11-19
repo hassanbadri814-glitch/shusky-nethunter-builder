@@ -691,23 +691,28 @@ jobs:
               )
           if not all(f'"{item}"' in text for item in required_module_outs):
               raise SystemExit("ERROR: required FIPS/RTL8187/EEPROM module_outs entries missing")
-          vendor_list_marker = (
-              'name = "vendor_dlkm_modules_list",\\n'
-              '    srcs = ["//private/devices/google/zuma:vendor_dlkm_modules_list"],'
+          vendor_list_block = """create_file(
+              name = "shusky_vendor_dlkm_modules_list",
+              srcs = [
+                  "//private/devices/google/zuma:vendor_dlkm_modules_list",
+                  "vendor_dlkm.modules.shusky",
+              ],
+              out = "vendor_dlkm.modules",
           )
-          vendor_list_replacement = (
-              'name = "vendor_dlkm_modules_list",\\n'
-              '    srcs = [\\n'
-              '        "//private/devices/google/zuma:vendor_dlkm_modules_list",\\n'
-              '        "vendor_dlkm.modules.shusky",\\n'
-              '    ],'
-          )
-          if vendor_list_replacement not in text:
-              if vendor_list_marker not in text:
-                  raise SystemExit("ERROR: cannot locate vendor_dlkm_modules_list source declaration")
-              text = text.replace(vendor_list_marker, vendor_list_replacement, 1)
-          if "vendor_dlkm.modules.shusky" not in text:
-              raise SystemExit("ERROR: Shusky RTL8187/EEPROM vendor DLKM filter was not wired")
+          """
+          if 'name = "shusky_vendor_dlkm_modules_list"' not in text:
+              marker = 'create_file(\\n    name = "system_dlkm_modules_list",'
+              if marker not in text:
+                  raise SystemExit("ERROR: cannot locate Shusky BUILD insertion point for vendor DLKM list")
+              text = text.replace(marker, vendor_list_block + "\\n" + marker, 1)
+          old_vendor_attr = 'vendor_dlkm_modules_list = ":vendor_dlkm_modules_list",'
+          new_vendor_attr = 'vendor_dlkm_modules_list = ":shusky_vendor_dlkm_modules_list",'
+          if new_vendor_attr not in text:
+              if text.count(old_vendor_attr) != 1:
+                  raise SystemExit("ERROR: cannot uniquely locate Shusky vendor_dlkm_modules_list attribute")
+              text = text.replace(old_vendor_attr, new_vendor_attr, 1)
+          if "vendor_dlkm.modules.shusky" not in text or new_vendor_attr not in text:
+              raise SystemExit("ERROR: Shusky RTL8187/EEPROM vendor DLKM list was not wired")
           build.write_text(text)
           fips_entry = "kernel/crypto/fips140.ko"
           ufs_fips_entry = "extra/private/google-modules/soc/gs/drivers/ufs/ufs-pixel-fips140.ko"
