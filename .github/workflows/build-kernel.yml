@@ -771,48 +771,30 @@ jobs:
           print("Expected full kernel release:", "6.1.145" + actual["SCMVERSION"])
           PY
 
-      - name: Verify Kleaf SCM stamp before compiling
+      - name: Verify Kleaf SCM override before compiling
         shell: bash
         run: |
           set -euo pipefail
           cd "$WORKSPACE"
-          tools/bazel build --nobuild \
-            --repo_manifest "$WORKSPACE:$(realpath out/manifest.xml)" \
-            --config=stamp \
-            --config=shusky \
-            --kernel_package=@//aosp \
-            --use_prebuilt_gki=14691759 \
-            --action_env=KLEAF_DOWNLOAD_BUILD_NUMBER_MAP=gki_prebuilts=14691759 \
-            --//private/devices/google/common:kernel=//private/devices/google/shusky:kernel \
-            --//private/google-modules/soc/gs:gs_soc_module=//private/devices/google/shusky:zuma_soc.shusky \
-            --no//private/devices/google/common:download_prebuilt_gki_fips140 \
-            //private/devices/google/shusky:zuma_shusky_dist
-
-          STATUS_FILE="$(find out/bazel -type f -name stable-status.txt -print -quit)"
-          if [ -z "$STATUS_FILE" ]; then
-            echo "ERROR: Bazel did not expose stable-status.txt; refusing an expensive build without verifying SCM stamping."
-            exit 1
-          fi
-          python3 - "$STATUS_FILE" "$EXPECTED_KERNEL_RELEASE" <<'PY'
+          python3 - "$EXPECTED_KERNEL_RELEASE" <<'PY'
           import json, sys
           from pathlib import Path
 
-          status = Path(sys.argv[1]).read_text().splitlines()
-          expected = sys.argv[2]
-          entries = [line.split(" ", 1)[1] for line in status
-                     if line.startswith("STABLE_SCMVERSIONS ")]
-          if len(entries) != 1:
-              raise SystemExit("ERROR: expected exactly one STABLE_SCMVERSIONS status entry")
-          versions = json.loads(entries[0])
-          values = list(versions.values())
-          if expected.removeprefix("6.1.145") not in values:
+          expected = sys.argv[1]
+          status = Path("aosp/workspace_status.json")
+          if not status.is_file():
+              raise SystemExit(f"ERROR: Kleaf SCM override file is missing: {status}")
+          payload = json.loads(status.read_text())
+          actual = payload.get("SCMVERSION")
+          if actual != expected.removeprefix("6.1.145"):
               raise SystemExit(
-                  "ERROR: Kleaf SCM stamping does not contain the pinned kernel release suffix. "
-                  f"Expected {expected!r}; observed {versions!r}"
+                  f"ERROR: wrong Kleaf SCMVERSION override: expected "
+                  f"{expected.removeprefix('6.1.145')!r}, observed {actual!r}"
               )
-          if any("dirty" in value for value in values):
-              raise SystemExit(f"ERROR: dirty SCM version remains in Kleaf status: {versions!r}")
-          print("Kleaf stable SCM status verified:", versions)
+          if "dirty" in actual:
+              raise SystemExit(f"ERROR: dirty SCM override: {actual!r}")
+          print("Kleaf SCM override verified:", actual)
+          print("Final module vermagic will be checked after the real build.")
           PY
 
       - name: Build Shusky Native FIPS kernel
