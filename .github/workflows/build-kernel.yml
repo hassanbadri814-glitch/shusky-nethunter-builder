@@ -605,7 +605,6 @@ jobs:
           cd "$WORKSPACE"
           python3 <<'PY'
           import os
-          import textwrap
           from pathlib import Path
           build = Path(
               "private/devices/google/shusky/BUILD.bazel"
@@ -623,7 +622,7 @@ jobs:
               "^kernel/drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
               "^kernel/drivers/misc/eeprom/eeprom_93cx6.ko",
           ]
-          vendor_dlkm_list.write_text("\n".join(vendor_dlkm_patterns) + "\\n")
+          vendor_dlkm_list.write_text("\n".join(vendor_dlkm_patterns) + "\n")
           text = build.read_text()
           fips_label = os.environ["FIPS_ABI_LABEL"]
           virtual_label = os.environ["VIRTUAL_ABI_LABEL"]
@@ -692,28 +691,29 @@ jobs:
               )
           if not all(f'"{item}"' in text for item in required_module_outs):
               raise SystemExit("ERROR: required FIPS/RTL8187/EEPROM module_outs entries missing")
-          vendor_list_block = textwrap.dedent("""
-          create_file(
-              name = "shusky_vendor_dlkm_modules_list",
-              srcs = [
-                  "//private/devices/google/zuma:vendor_dlkm_modules_list",
-                  "vendor_dlkm.modules.shusky",
-              ],
-              out = "vendor_dlkm.modules",
+          # Extend the existing Shusky output rule. Do not declare a second
+          # create_file rule for vendor_dlkm.modules: Bazel requires one owner
+          # for each generated output in a package.
+          import re
+          pattern = re.compile(
+              r'(create_file\\(\\s*name = "vendor_dlkm_modules_list",\\s*srcs = \\[)(.*?)(\\],\\s*out = "vendor_dlkm\\.modules",\\s*\\))',
+              re.S,
           )
-          """)
-          if 'name = "shusky_vendor_dlkm_modules_list"' not in text:
-              marker = "create_file(" + chr(10) + "    name = " + chr(34) + "system_dlkm_modules_list" + chr(34) + ","
-              if marker not in text:
-                  raise SystemExit("ERROR: cannot locate Shusky BUILD insertion point for vendor DLKM list")
-              text = text.replace(marker, vendor_list_block + chr(10) + marker, 1)
-          old_vendor_attr = 'vendor_dlkm_modules_list = ":vendor_dlkm_modules_list",'
-          new_vendor_attr = 'vendor_dlkm_modules_list = ":shusky_vendor_dlkm_modules_list",'
-          if new_vendor_attr not in text:
-              if text.count(old_vendor_attr) != 1:
-                  raise SystemExit("ERROR: cannot uniquely locate Shusky vendor_dlkm_modules_list attribute")
-              text = text.replace(old_vendor_attr, new_vendor_attr, 1)
-          if "vendor_dlkm.modules.shusky" not in text or new_vendor_attr not in text:
+          matches = list(pattern.finditer(text))
+          if len(matches) != 1:
+              raise SystemExit(
+                  "ERROR: expected exactly one existing Shusky vendor_dlkm_modules_list output rule"
+              )
+          match = matches[0]
+          srcs = match.group(2)
+          if '"vendor_dlkm.modules.shusky"' not in srcs:
+              srcs = srcs.rstrip() + '\\n        "vendor_dlkm.modules.shusky",\\n    '
+              text = text[:match.start(2)] + srcs + text[match.end(2):]
+          if text.count('name = "vendor_dlkm_modules_list"') != 1:
+              raise SystemExit("ERROR: duplicate vendor_dlkm_modules_list rule")
+          if 'vendor_dlkm_modules_list = ":vendor_dlkm_modules_list",' not in text:
+              raise SystemExit("ERROR: existing Shusky vendor_dlkm_modules_list consumer was changed")
+          if "vendor_dlkm.modules.shusky" not in text:
               raise SystemExit("ERROR: Shusky RTL8187/EEPROM vendor DLKM list was not wired")
           build.write_text(text)
           fips_entry = "kernel/crypto/fips140.ko"
