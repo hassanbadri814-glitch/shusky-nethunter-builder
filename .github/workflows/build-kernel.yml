@@ -1567,6 +1567,23 @@ jobs:
               -print
           } | tee "$REPORT_DIR/build-summary.txt"
 
+      # Keep real image/module inputs even when a later audit fails.
+      # A separate audit-only workflow can reuse these without recompiling.
+      - name: Upload Native FIPS audit inputs for reuse
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-audit-inputs
+          path: |
+            workspace/out/shusky/dist/vendor_dlkm.img
+            workspace/out/shusky/dist/system_dlkm.img
+            workspace/out/bazel/**/kernel_images_*/staging/lib/modules/**/kernel/drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko
+            workspace/out/bazel/**/kernel_images_*/staging/lib/modules/**/kernel/drivers/misc/eeprom/eeprom_93cx6.ko
+            workspace/build-report/kernel-image-release.txt
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
+
       - name: Package verified Native FIPS and RTL8187 artifacts
         if: success()
         shell: bash
