@@ -100,7 +100,7 @@ wiphy_start = cfg80211.find("void wiphy_unregister")
 if wiphy_start < 0 or "rfkill_unregister(rdev->wiphy.rfkill)" not in cfg80211[wiphy_start:wiphy_start + 5000]:
     raise SystemExit("ERROR: wiphy_unregister() does not visibly unregister rfkill")
 
-if re.search(r"(?<!_)skb_unlink\\s*\\(", dev) or "rfkill_pause_polling" in dev + rfkill_c + rfkill_h:
+if re.search(r"(?<!_)skb_unlink\s*\(", dev) or "rfkill_pause_polling" in dev + rfkill_c + rfkill_h:
     raise SystemExit("ERROR: protected skb_unlink/rfkill_pause_polling reference remains")
 if dev.count("__skb_unlink(skb, &priv->rx_queue)") != 3:
     raise SystemExit("ERROR: expected original RX dequeue plus two locked __skb_unlink sites")
