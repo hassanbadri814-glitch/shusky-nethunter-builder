@@ -703,10 +703,10 @@ jobs:
           )
           """)
           if 'name = "shusky_vendor_dlkm_modules_list"' not in text:
-              marker = 'create_file(\\n    name = "system_dlkm_modules_list",'
+              marker = "create_file(" + chr(10) + "    name = \"system_dlkm_modules_list\",
               if marker not in text:
                   raise SystemExit("ERROR: cannot locate Shusky BUILD insertion point for vendor DLKM list")
-              text = text.replace(marker, vendor_list_block + "\\n" + marker, 1)
+              text = text.replace(marker, vendor_list_block + chr(10) + marker, 1)
           old_vendor_attr = 'vendor_dlkm_modules_list = ":vendor_dlkm_modules_list",'
           new_vendor_attr = 'vendor_dlkm_modules_list = ":shusky_vendor_dlkm_modules_list",'
           if new_vendor_attr not in text:
