@@ -25,6 +25,26 @@ done
 debugfs -R "rdump / $TMP/vendor" "$VENDOR_IMAGE" >"$TMP/vendor-rdump.log" 2>&1 || fail "cannot extract vendor_dlkm filesystem"
 debugfs -R "rdump / $TMP/system" "$SYSTEM_IMAGE" >"$TMP/system-rdump.log" 2>&1 || fail "cannot extract system_dlkm filesystem"
 
+# Preserve compact, read-only filesystem diagnostics for partition-fit analysis.
+{
+  for image in "$VENDOR_IMAGE" "$SYSTEM_IMAGE"; do
+    echo "=== $(basename "$image") ==="
+    stat -c 'image_bytes=%s' "$image"
+    resize2fs -P "$image" 2>&1 || true
+    debugfs -R stats "$image" 2>&1 | grep -E 'Block count:|Block size:|Free blocks:|Inode count:|Free inodes:' || true
+  done
+  echo "=== vendor_dlkm largest files ==="
+  find "$TMP/vendor" -type f -printf '%s %p\\n' | sort -nr | head -30
+  echo "=== vendor_dlkm modules.load ==="
+  if [ -f "$TMP/vendor/lib/modules/modules.load" ]; then
+    cat "$TMP/vendor/lib/modules/modules.load"
+  else
+    echo "MISSING"
+  fi
+  echo "=== system_dlkm largest files ==="
+  find "$TMP/system" -type f -printf '%s %p\\n' | sort -nr | head -20
+} | tee "$REPORT_DIR/dlkm-filesystem-diagnostics.txt"
+
 mapfile -t RTL_FILES < <(find "$TMP/vendor" "$TMP/system" -type f -name rtl8187.ko -print | sort)
 mapfile -t EEPROM_FILES < <(find "$TMP/vendor" "$TMP/system" -type f -name eeprom_93cx6.ko -print | sort)
 [ "${#RTL_FILES[@]}" -eq 1 ] || fail "expected exactly one rtl8187.ko inside combined DLKM images; found ${#RTL_FILES[@]}"
