@@ -1,136 +1,170 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Fail-closed audit for the Shusky RTL8187 module. No device access or flashing.
+set -Eeuo pipefail
+IFS=$'\n\t'
 
 WORKSPACE="${1:?workspace path required}"
 EXPECTED_RELEASE="${2:?expected kernel release required}"
 REPORT_DIR="${3:?report directory required}"
 CONFIG="${4:?final kernel config path required}"
+GKI_BUILD_ID="${5:-14691759}"
 mkdir -p "$REPORT_DIR"
 
-mapfile -t MODULES < <(
-  find "$WORKSPACE/out/bazel" -type f \
-    -path '*/staging/lib/modules/*/kernel/drivers/net/wireless/realtek/rtl8187/rtl8187.ko' \
-    -print | sort -u
-)
-if [ "${#MODULES[@]}" -lt 1 ]; then
-  echo "ERROR: no staged rtl8187.ko found"
-  exit 1
-fi
-HASH_COUNT="$(sha256sum "${MODULES[@]}" | awk '{print $1}' | sort -u | wc -l)"
-if [ "$HASH_COUNT" -ne 1 ]; then
-  echo "ERROR: staged RTL8187 module copies are not byte-identical"
-  sha256sum "${MODULES[@]}"
-  exit 1
+fail() { echo "FATAL: $*" >&2; exit 1; }
+require_config() {
+  grep -qxF "$1" "$CONFIG" || fail "final kernel config lacks exact setting: $1"
+}
+
+# Assert the actual merged .config, not just the defconfig fragment.
+require_config 'CONFIG_MODULES=y'
+require_config 'CONFIG_MODVERSIONS=y'
+require_config 'CONFIG_WLAN=y'
+require_config 'CONFIG_CFG80211=m'
+require_config 'CONFIG_MAC80211=m'
+require_config 'CONFIG_USB=y'
+require_config 'CONFIG_RTL8187=m'
+require_config 'CONFIG_EEPROM_93CX6=m'
+require_config 'CONFIG_CRYPTO_FIPS140_MOD=m'
+if grep -Eq '^CONFIG_KSU=(y|m)$' "$CONFIG"; then
+  fail "CONFIG_KSU must remain disabled"
 fi
 
+# Locate the module only in Kleaf kernel staging trees, not arbitrary build files.
+mapfile -t MODULES < <(
+  find "$WORKSPACE/out/bazel" -type f \
+    -path '*/kernel_images_*/staging/lib/modules/*/kernel/drivers/net/wireless/realtek/rtl8187/rtl8187.ko' \
+    -print | sort -u
+)
+[ "${#MODULES[@]}" -ge 1 ] || fail "no staged RTL8187 module found"
+HASH_COUNT="$(sha256sum "${MODULES[@]}" | awk '{print $1}' | sort -u | wc -l)"
+[ "$HASH_COUNT" -eq 1 ] || {
+  sha256sum "${MODULES[@]}"
+  fail "RTL8187 copies in final staging trees are not byte-identical"
+}
 MODULE="${MODULES[0]}"
-readelf -h "$MODULE" | grep -Eq 'Type:[[:space:]]+REL'
-readelf -h "$MODULE" | grep -Eq 'Machine:[[:space:]]+AArch64'
+
+readelf -h "$MODULE" | grep -Eq 'Type:[[:space:]]+REL' || fail "RTL8187 is not an ELF relocatable module"
+readelf -h "$MODULE" | grep -Eq 'Machine:[[:space:]]+AArch64' || fail "RTL8187 is not AArch64"
+[ "$(modinfo -F name "$MODULE")" = "rtl8187" ] || fail "unexpected module internal name"
 RELEASE="$(modinfo -F vermagic "$MODULE" | awk '{print $1}')"
 RELEASE="${RELEASE%-ab*}"
-if [ "$RELEASE" != "$EXPECTED_RELEASE" ]; then
-  echo "ERROR: RTL8187 vermagic $RELEASE does not match $EXPECTED_RELEASE"
-  exit 1
+[ "$RELEASE" = "$EXPECTED_RELEASE" ] || fail "vermagic $RELEASE != expected $EXPECTED_RELEASE"
+
+# Verify that this module actually advertises the adapter's USB VID:PID.
+if ! modinfo -F alias "$MODULE" | grep -Eiq 'usb:v0BDAp8187'; then
+  fail "RTL8187 module has no USB alias for Realtek 0BDA:8187"
 fi
 
 DEPENDS="$(modinfo -F depends "$MODULE")"
-case ",$DEPENDS," in
-  *,mac80211,*) ;;
-  *) echo "ERROR: RTL8187 does not declare its mac80211 dependency"; exit 1 ;;
-esac
-if ! grep -Eq '^CONFIG_EEPROM_93CX6=(m|y)$' "$CONFIG"; then
-  echo "ERROR: EEPROM_93CX6 is not enabled in the final kernel config"
-  exit 1
+case ",$DEPENDS," in *,mac80211,*) ;; *) fail "mac80211 is not a declared RTL8187 dependency" ;; esac
+case ",$DEPENDS," in *,eeprom_93cx6,*) ;; *) fail "eeprom_93cx6 is not a declared RTL8187 dependency" ;; esac
+
+# Every staging copy must have a coherent modules.dep and every direct
+# dependency named by modinfo must resolve to a real module in that tree.
+for MODULE_PATH in "${MODULES[@]}"; do
+  ROOT="${MODULE_PATH%%/kernel/drivers/net/wireless/realtek/rtl8187/rtl8187.ko}"
+  DEPFILE="$ROOT/modules.dep"
+  [ -s "$DEPFILE" ] || fail "missing/empty modules.dep in $ROOT"
+  RELPATH="${MODULE_PATH#"$ROOT"/}"
+  LINE="$(grep -F "$RELPATH:" "$DEPFILE" || true)"
+  [ -n "$LINE" ] || fail "modules.dep lacks exact RTL8187 entry in $ROOT"
+  python3 - "$ROOT" "$LINE" "$DEPENDS" <<'PY'
+import os, sys
+root, line, depends = sys.argv[1:]
+lhs, sep, rhs = line.partition(":")
+if not sep or not lhs.endswith("/rtl8187.ko"):
+    raise SystemExit("ERROR: malformed RTL8187 modules.dep line")
+deps = rhs.split()
+for item in deps:
+    if not os.path.isfile(os.path.join(root, item)):
+        raise SystemExit(f"ERROR: modules.dep dependency does not exist: {item}")
+dep_names = {os.path.basename(x).removesuffix(".ko") for x in deps}
+for name in filter(None, depends.split(",")):
+    if name not in dep_names:
+        raise SystemExit(f"ERROR: modinfo dependency {name} absent from modules.dep")
+PY
+  [ -s "$ROOT/kernel/net/mac80211/mac80211.ko" ] || fail "mac80211.ko absent from same staging tree"
+  [ -s "$ROOT/kernel/drivers/misc/eeprom/eeprom_93cx6.ko" ] || fail "eeprom_93cx6.ko absent from same staging tree"
+done
+
+# This is a hot-plug USB module: it must not be part of early boot modules.load.
+if find "$WORKSPACE/out/bazel" -type f -name modules.load -exec grep -lE '(^|/)rtl8187\.ko|(^|/)eeprom_93cx6\.ko' {} + | grep -q .; then
+  fail "RTL8187/EEPROM was incorrectly added to early-boot modules.load"
 fi
 
-MODULES_ROOT="${MODULE%%/kernel/drivers/net/wireless/realtek/rtl8187/rtl8187.ko}"
-DEPFILE="$MODULES_ROOT/modules.dep"
-if [ ! -f "$DEPFILE" ]; then
-  echo "ERROR: matching modules.dep not found beside RTL8187 staging tree"
-  exit 1
-fi
-DEP_LINE="$(grep -F 'kernel/drivers/net/wireless/realtek/rtl8187/rtl8187.ko:' "$DEPFILE" || true)"
-if [ -z "$DEP_LINE" ]; then
-  echo "ERROR: modules.dep has no RTL8187 dependency entry"
-  exit 1
-fi
-if [[ "$DEPENDS" == *eeprom_93cx6* ]]; then
-  if [[ "$DEP_LINE" != *eeprom_93cx6.ko* ]]; then
-    echo "ERROR: modules.dep does not resolve the EEPROM module dependency"
-    exit 1
-  fi
-  if [ ! -f "$MODULES_ROOT/kernel/drivers/misc/eeprom/eeprom_93cx6.ko" ] && \
-     ! find "$WORKSPACE/out/bazel" -type f -name eeprom_93cx6.ko -print -quit | grep -q .; then
-    echo "ERROR: eeprom_93cx6.ko is not present in any staged build output"
-    exit 1
-  fi
-fi
+# Cross-check imported symbol CRCs against the exact pinned GKI build and
+# this build's Module.symvers. Never merge conflicting CRC definitions.
+GKI_SYMVERS="$REPORT_DIR/gki-vmlinux.symvers"
+curl -fsSL --retry 3 --retry-delay 2 \
+  "https://ci.android.com/builds/submitted/$GKI_BUILD_ID/kernel_aarch64/latest/raw/vmlinux.symvers" \
+  -o "$GKI_SYMVERS"
+[ -s "$GKI_SYMVERS" ] || fail "pinned GKI vmlinux.symvers is empty"
+mapfile -t SYMVERS_FILES < <(find "$WORKSPACE/out/bazel" -type f -name Module.symvers -size +0c -print | sort -u)
+[ "${#SYMVERS_FILES[@]}" -gt 0 ] || fail "no non-empty Module.symvers from this build"
 
-if find "$WORKSPACE/out" -type f -name modules.load -exec grep -l 'rtl8187.ko' {} + | grep -q .; then
-  echo "ERROR: RTL8187 was placed in early-boot modules.load; it must remain on-demand"
-  exit 1
-fi
+python3 - "$MODULE" "$GKI_SYMVERS" "$REPORT_DIR/rtl8187-kmi-crc-audit.txt" "${SYMVERS_FILES[@]}" <<'PY'
+import re, subprocess, sys
+module, gki_path, report_path, *module_paths = sys.argv[1:]
+def parse(path):
+    out = {}
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            p = line.split()
+            if len(p) >= 2 and re.fullmatch(r"(?:0x)?[0-9a-fA-F]{8}", p[0]):
+                crc = p[0].lower().removeprefix("0x")
+                out.setdefault(p[1], set()).add(crc)
+    return out
 
-mapfile -t SYMVERS < <(find "$WORKSPACE/out/bazel" -type f -name Module.symvers -print)
-if [ "${#SYMVERS[@]}" -eq 0 ]; then
-  echo "ERROR: no Module.symvers found for the RTL8187 CRC audit"
-  exit 1
-fi
-
-python3 - "$MODULE" "$REPORT_DIR/rtl8187-kmi-crc-audit.txt" "${SYMVERS[@]}" <<'PY'
-import subprocess, sys
-module, report, *symvers_files = sys.argv[1:]
-def norm(value):
-    value = value.lower()
-    return value[2:] if value.startswith("0x") else value
-
-exports = {}
-for path in symvers_files:
-    with open(path, encoding="utf-8", errors="replace") as stream:
-        for line in stream:
-            fields = line.split()
-            if len(fields) >= 2 and fields[0].startswith("0x"):
-                exports.setdefault(fields[1], set()).add(norm(fields[0]))
+exports = parse(gki_path)
+for path in module_paths:
+    for symbol, crcs in parse(path).items():
+        exports.setdefault(symbol, set()).update(crcs)
 
 output = subprocess.check_output(["modprobe", "--show-modversions", module], text=True)
 imports = []
 for line in output.splitlines():
-    fields = line.split()
-    if len(fields) >= 2 and fields[0].startswith("0x"):
-        imports.append((fields[1], norm(fields[0])))
+    p = line.split()
+    if len(p) >= 2 and re.fullmatch(r"(?:0x)?[0-9a-fA-F]{8}", p[0]):
+        imports.append((p[1], p[0].lower().removeprefix("0x")))
 
-missing, mismatches = [], []
-for symbol, crc in imports:
-    available = exports.get(symbol, set())
-    if not available:
+missing, ambiguous, mismatches = [], [], []
+for symbol, expected in imports:
+    found = exports.get(symbol)
+    if not found:
         missing.append(symbol)
-    elif crc not in available:
-        mismatches.append((symbol, crc, ",".join(sorted(available))))
+    elif len(found) != 1:
+        ambiguous.append((symbol, ",".join(sorted(found))))
+    elif expected not in found:
+        mismatches.append((symbol, expected, next(iter(found))))
 
 lines = [
-    f"RTL8187 module: {module}",
-    f"Module.symvers files scanned: {len(symvers_files)}",
-    f"Imported symbols checked: {len(imports)}",
-    f"Missing symbols: {len(missing)}",
-    f"CRC mismatches: {len(mismatches)}",
+    f"module={module}",
+    f"pinned_GKI_build={gki_path}",
+    f"Module.symvers_files={len(module_paths)}",
+    f"imports_checked={len(imports)}",
+    f"missing_symbols={len(missing)}",
+    f"ambiguous_export_CRCS={len(ambiguous)}",
+    f"CRC_mismatches={len(mismatches)}",
 ]
-lines.extend(f"MISSING {symbol}" for symbol in missing)
-lines.extend(f"CRC_MISMATCH {symbol} module={crc} build={available}"
-             for symbol, crc, available in mismatches)
-with open(report, "w", encoding="utf-8") as stream:
-    stream.write("\n".join(lines) + "\n")
+lines += [f"MISSING {x}" for x in missing]
+lines += [f"AMBIGUOUS {n} CRCs={v}" for n,v in ambiguous]
+lines += [f"CRC_MISMATCH {n} module={e} build={a}" for n,e,a in mismatches]
+with open(report_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
 print("\n".join(lines))
-if not imports or missing or mismatches:
-    raise SystemExit("ERROR: RTL8187 symbol CRC audit failed")
+if not imports or missing or ambiguous or mismatches:
+    raise SystemExit("ERROR: RTL8187 imported-symbol CRC audit failed")
 PY
 
 {
   echo "RTL8187 module: $MODULE"
+  echo "SHA256: $(sha256sum "$MODULE" | awk '{print $1}')"
   echo "Kernel release/vermagic: $RELEASE"
-  echo "Dependencies: $DEPENDS"
-  echo "EEPROM_93CX6 config: enabled"
-  echo "modules.dep dependency graph: PASS"
+  echo "USB alias 0BDA:8187: PASS"
+  echo "Declared dependencies: $DEPENDS"
+  echo "Same-tree mac80211 + EEPROM dependencies: PASS"
+  echo "modules.dep direct dependency resolution: PASS"
   echo "No early-boot modules.load entry: PASS"
-  echo "Imported symbol CRC audit: PASS"
-  echo "The Bazel/Kleaf strict Pixel KMI check remains authoritative; no KMI whitelist was expanded."
+  echo "Pinned GKI + same-build Module.symvers CRC audit: PASS"
+  echo "Strict Pixel KMI remains authoritative; no whitelist was widened."
 } | tee "$REPORT_DIR/rtl8187-module-verification.txt"
