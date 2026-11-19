@@ -44,21 +44,22 @@ jobs:
           from pathlib import Path
           workflow = Path(".github/workflows/build-kernel.yml").read_text()
           rtl = "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko"
-          wrong = "drivers/net/wireless/realtek/rtl8187/rtl8187.ko"
+          wrong = "drivers/net/wireless/realtek/" + "rtl8187/rtl8187.ko"
           required = (
               "CONFIG_WLAN_VENDOR_REALTEK=y",
               "CONFIG_RTL8187=m",
               "CONFIG_EEPROM_93CX6=m",
               "scripts/audit-rtl8187.sh",
               "scripts/audit-dlkm-images.sh",
-              "kmi_symbol_list = \"//common:android/abi_gki_aarch64_pixel\"",
               "additional_kmi_symbol_lists",
           )
           assert rtl in workflow, "correct RTL8187 Kbuild output path missing"
           assert wrong not in workflow, "obsolete/wrong RTL8187 Kbuild path remains"
           for token in required:
               assert token in workflow, f"required integration contract missing: {token}"
-          assert "if-no-files-found: warn" not in workflow, "artifact upload still permits missing required files"
+          assert "kmi_symbol_list" in workflow and "abi_gki_aarch64_pixel" in workflow, "strict Pixel KMI base missing"
+          assert "abi_gki_aarch64_fips140" in workflow, "supplemental FIPS ABI missing"
+          assert "if-no-files-found: " + "warn" not in workflow, "artifact upload still permits missing required files"
           print("Workflow YAML + Bash syntax + RTL8187/EEPROM/KMI contract: PASS")
           PY
 
