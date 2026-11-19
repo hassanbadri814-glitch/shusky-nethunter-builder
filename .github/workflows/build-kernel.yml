@@ -707,7 +707,10 @@ jobs:
           match = matches[0]
           srcs = match.group(2)
           if '"vendor_dlkm.modules.shusky"' not in srcs:
-              srcs = srcs.rstrip() + '\n        "vendor_dlkm.modules.shusky",\n    '
+              srcs = srcs.rstrip()
+              if srcs and not srcs.endswith(","):
+                  srcs += ","
+              srcs += '\n        "vendor_dlkm.modules.shusky",\n    '
               text = text[:match.start(2)] + srcs + text[match.end(2):]
           if text.count('name = "vendor_dlkm_modules_list"') != 1:
               raise SystemExit("ERROR: duplicate vendor_dlkm_modules_list rule")
