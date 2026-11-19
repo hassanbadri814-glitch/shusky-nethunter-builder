@@ -6,23 +6,39 @@ ROOT="${1:?Android kernel source root required}"
 REPORT_DIR="${2:?report directory required}"
 GKI_BUILD_ID="${3:-14691759}"
 ABI="$ROOT/android/abi_gki_aarch64_virtual_device"
-GKI_CONFIG="$ROOT/build.config.gki.aarch64"
 GKI_BUILD="$ROOT/BUILD.bazel"
 SYMVERS="$REPORT_DIR/gki-vmlinux.symvers"
 REPORT="$REPORT_DIR/rtl8187-gki-virtual-device-abi.txt"
 mkdir -p "$REPORT_DIR"
-for f in "$ABI" "$GKI_CONFIG" "$GKI_BUILD"; do
+for f in "$ABI" "$GKI_BUILD"; do
   test -s "$f" || { echo "ERROR: required official GKI ABI file missing: $f" >&2; exit 1; }
 done
 
-grep -Fq 'abi_gki_aarch64_virtual_device' "$GKI_CONFIG" || {
-  echo "ERROR: pinned GKI build.config does not include virtual_device ABI." >&2
-  exit 1
-}
-grep -Fq 'android/abi_gki_aarch64_virtual_device' "$GKI_BUILD" || {
-  echo "ERROR: pinned GKI BUILD.bazel does not include virtual_device ABI." >&2
-  exit 1
-}
+# On this Android 6.1 branch, the authoritative GKI symbol-list
+# aggregation is maintained in BUILD.bazel, not build.config.gki.aarch64.
+# Verify that the official virtual_device list is part of the GKI
+# aarch64_additional_kmi_symbol_lists filegroup used by kernel_aarch64.
+python3 - "$GKI_BUILD" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+start = text.find('name = "aarch64_additional_kmi_symbol_lists"')
+if start < 0:
+    raise SystemExit("ERROR: GKI additional KMI symbol-list filegroup missing.")
+end = text.find('visibility = ["//visibility:public"]', start)
+if end < 0:
+    raise SystemExit("ERROR: GKI additional KMI symbol-list filegroup is malformed.")
+block = text[start:end]
+required = '"android/abi_gki_aarch64_virtual_device"'
+if required not in block:
+    raise SystemExit("ERROR: pinned GKI filegroup does not include virtual_device ABI.")
+kernel_start = text.find('"kernel_aarch64": {')
+kernel_end = text.find('"kernel_aarch64_16k": {', kernel_start)
+kernel_block = text[kernel_start:kernel_end]
+if '":aarch64_additional_kmi_symbol_lists"' not in kernel_block:
+    raise SystemExit("ERROR: kernel_aarch64 does not consume the official additional KMI list filegroup.")
+print("Pinned GKI BUILD.bazel virtual_device ABI integration: PASS")
+PY
 
 curl -fsSL --retry 3 --retry-delay 2 \
   "https://ci.android.com/builds/submitted/$GKI_BUILD_ID/kernel_aarch64/latest/raw/vmlinux.symvers" \
