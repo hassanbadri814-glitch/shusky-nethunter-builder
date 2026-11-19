@@ -39,6 +39,8 @@ jobs:
           set -Eeuo pipefail
           bash -n "$GITHUB_WORKSPACE/scripts/audit-rtl8187.sh"
           bash -n "$GITHUB_WORKSPACE/scripts/audit-dlkm-images.sh"
+          bash -n "$GITHUB_WORKSPACE/scripts/patch-rtl8187-kmi.sh"
+          bash -n "$GITHUB_WORKSPACE/scripts/audit-rtl8187-kmi-base.sh"
           ruby -e 'require "yaml"; YAML.load_file(ARGV.fetch(0))' "$GITHUB_WORKSPACE/.github/workflows/build-kernel.yml"
           python3 <<'PY'
           from pathlib import Path
@@ -51,7 +53,11 @@ jobs:
               "CONFIG_EEPROM_93CX6=m",
               "scripts/audit-rtl8187.sh",
               "scripts/audit-dlkm-images.sh",
+              "scripts/patch-rtl8187-kmi.sh",
+              "scripts/audit-rtl8187-kmi-base.sh",
               "additional_kmi_symbol_lists",
+              "abi_gki_aarch64_virtual_device",
+              "VIRTUAL_ABI_LABEL",
           )
           assert rtl in workflow, "correct RTL8187 Kbuild output path missing"
           assert wrong not in workflow, "obsolete/wrong RTL8187 Kbuild path remains"
@@ -358,7 +364,23 @@ jobs:
           tools/bazel query "$ABI_LABEL" \
             --output=label \
             | tee "$REPORT_DIR/fips-abi-bazel-query.txt"
+          VIRTUAL_ABI_FILE="abi_gki_aarch64_virtual_device"
+          VIRTUAL_ABI_RELATIVE="${ABI_RELATIVE/abi_gki_aarch64_fips140/$VIRTUAL_ABI_FILE}"
+          VIRTUAL_ABI_LABEL="${ABI_LABEL/abi_gki_aarch64_fips140/$VIRTUAL_ABI_FILE}"
+          test -s "aosp/$VIRTUAL_ABI_RELATIVE"
+          if ! grep -Fq "$VIRTUAL_ABI_RELATIVE" "$ABI_BUILD"; then
+            cat >> "$ABI_BUILD" <<EOF
+          # Reuse Google's already-published generic GKI virtual-device ABI.
+          exports_files([
+              "$VIRTUAL_ABI_RELATIVE",
+          ])
+          EOF
+          fi
+          tools/bazel query "$VIRTUAL_ABI_LABEL" \
+            --output=label \
+            | tee "$REPORT_DIR/virtual-device-abi-bazel-query.txt"
           echo "FIPS_ABI_LABEL=$ABI_LABEL" >> "$GITHUB_ENV"
+          echo "VIRTUAL_ABI_LABEL=$VIRTUAL_ABI_LABEL" >> "$GITHUB_ENV"
 
       - name: Verify Shusky and Zuma build definitions
         shell: bash
@@ -517,6 +539,19 @@ jobs:
             echo "EEPROM_93CX6 source and Makefile: PASS"
           } | tee "$REPORT_DIR/rtl8187-source-verification.txt"
 
+      - name: Apply RTL8187 KMI-safe source compatibility and verify pinned GKI ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          bash "$GITHUB_WORKSPACE/scripts/patch-rtl8187-kmi.sh" \
+            "$WORKSPACE/aosp" \
+            "$REPORT_DIR/rtl8187-kmi-source-patch.txt"
+          bash "$GITHUB_WORKSPACE/scripts/audit-rtl8187-kmi-base.sh" \
+            "$WORKSPACE/aosp" \
+            "$REPORT_DIR" \
+            14691759
+
       - name: Create native FIPS defconfig fragment
         shell: bash
         run: |
@@ -558,6 +593,7 @@ jobs:
           )
           text = build.read_text()
           fips_label = os.environ["FIPS_ABI_LABEL"]
+          virtual_label = os.environ["VIRTUAL_ABI_LABEL"]
           if "nethunter_fips_defconfig" not in text:
               old = '"shusky_defconfig"'
               if old not in text:
@@ -583,14 +619,27 @@ jobs:
                   old + f'''
               additional_kmi_symbol_lists = [
                   "{fips_label}",
+                  "{virtual_label}",
               ],''',
                   1
               )
-          elif fips_label not in text:
-              raise SystemExit(
-                  "ERROR: Existing additional_kmi_symbol_lists "
-                  "does not contain the FIPS ABI label."
-              )
+          else:
+              if fips_label not in text:
+                  raise SystemExit(
+                      "ERROR: Existing additional_kmi_symbol_lists "
+                      "does not contain the FIPS ABI label."
+                  )
+              if virtual_label not in text:
+                  marker = f'        "{fips_label}",'
+                  if marker not in text:
+                      raise SystemExit(
+                          "ERROR: Cannot safely add official virtual_device ABI label."
+                      )
+                  text = text.replace(
+                      marker,
+                      marker + f'\n        "{virtual_label}",',
+                      1,
+                  )
           required_module_outs = [
               "crypto/fips140.ko",
               "drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
@@ -632,6 +681,7 @@ jobs:
               )
           print("Shusky BUILD updated.")
           print("FIPS ABI:", fips_label)
+          print("Existing official GKI virtual_device ABI:", virtual_label)
           print("FIPS module added to module_outs.")
           print("FIPS added to Zuma ramdisk list.")
           print("Existing Zuma module ordering preserved.")
@@ -679,6 +729,7 @@ jobs:
           done
           grep -n 'abi_gki_aarch64_pixel' private/devices/google/shusky/BUILD.bazel
           grep -n "$FIPS_ABI_LABEL" private/devices/google/shusky/BUILD.bazel
+          grep -n "$VIRTUAL_ABI_LABEL" private/devices/google/shusky/BUILD.bazel
           grep -n 'crypto/fips140.ko' private/devices/google/shusky/BUILD.bazel
           echo "Configured GKI and Native FIPS dependency graph: PASS" \
             | tee "$REPORT_DIR/pre-build-verification.txt"
