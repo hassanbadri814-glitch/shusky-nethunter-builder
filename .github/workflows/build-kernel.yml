@@ -756,7 +756,7 @@ jobs:
         shell: bash
         env:
           BUILD_NUMBER: "14691759"
-          KLEAF_REPO_MANIFEST: \${{ github.workspace }}/workspace/out/manifest.xml
+          KLEAF_REPO_MANIFEST: ${{ github.workspace }}/workspace/out/manifest.xml
           KLEAF_USE_KLEAF_LOCALVERSION: "true"
         run: |
           set -euo pipefail
