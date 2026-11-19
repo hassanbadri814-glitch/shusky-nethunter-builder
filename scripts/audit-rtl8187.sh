@@ -32,7 +32,7 @@ fi
 # Locate the module only in Kleaf kernel staging trees, not arbitrary build files.
 mapfile -t MODULES < <(
   find "$WORKSPACE/out/bazel" -type f \
-    -path '*/kernel_images_*/staging/lib/modules/*/kernel/drivers/net/wireless/realtek/rtl8187/rtl8187.ko' \
+    -path '*/kernel_images_*/staging/lib/modules/*/kernel/drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko' \
     -print | sort -u
 )
 [ "${#MODULES[@]}" -ge 1 ] || fail "no staged RTL8187 module found"
@@ -62,7 +62,7 @@ case ",$DEPENDS," in *,eeprom_93cx6,*) ;; *) fail "eeprom_93cx6 is not a declare
 # Every staging copy must have a coherent modules.dep and every direct
 # dependency named by modinfo must resolve to a real module in that tree.
 for MODULE_PATH in "${MODULES[@]}"; do
-  ROOT="${MODULE_PATH%%/kernel/drivers/net/wireless/realtek/rtl8187/rtl8187.ko}"
+  ROOT="${MODULE_PATH%%/kernel/drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko}"
   DEPFILE="$ROOT/modules.dep"
   [ -s "$DEPFILE" ] || fail "missing/empty modules.dep in $ROOT"
   RELPATH="${MODULE_PATH#"$ROOT"/}"
