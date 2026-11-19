@@ -100,6 +100,8 @@ def walk(path):
     full = os.path.join(root, path)
     if not os.path.isfile(full):
         raise SystemExit(f"ERROR: dependency module file missing: {path}")
+    if path not in depmap:
+        raise SystemExit(f"ERROR: dependency module has no modules.dep record: {path}")
     active.add(path)
     for child in depmap.get(path, []):
         walk(child)
