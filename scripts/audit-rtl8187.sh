@@ -12,13 +12,20 @@ mapfile -t MODULES < <(
     -path '*/staging/lib/modules/*/kernel/drivers/net/wireless/realtek/rtl8187/rtl8187.ko' \
     -print | sort -u
 )
-if [ "${#MODULES[@]}" -ne 1 ]; then
-  printf 'ERROR: expected exactly one staged rtl8187.ko; found %s\n' "${#MODULES[@]}"
-  printf '%s\n' "${MODULES[@]}"
+if [ "${#MODULES[@]}" -lt 1 ]; then
+  echo "ERROR: no staged rtl8187.ko found"
+  exit 1
+fi
+HASH_COUNT="$(sha256sum "${MODULES[@]}" | awk '{print $1}' | sort -u | wc -l)"
+if [ "$HASH_COUNT" -ne 1 ]; then
+  echo "ERROR: staged RTL8187 module copies are not byte-identical"
+  sha256sum "${MODULES[@]}"
   exit 1
 fi
 
 MODULE="${MODULES[0]}"
+readelf -h "$MODULE" | grep -Eq 'Type:[[:space:]]+REL'
+readelf -h "$MODULE" | grep -Eq 'Machine:[[:space:]]+AArch64'
 RELEASE="$(modinfo -F vermagic "$MODULE" | awk '{print $1}')"
 RELEASE="${RELEASE%-ab*}"
 if [ "$RELEASE" != "$EXPECTED_RELEASE" ]; then
