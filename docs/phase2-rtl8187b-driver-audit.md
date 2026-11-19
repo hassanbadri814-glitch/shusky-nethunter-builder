@@ -48,3 +48,12 @@ The Bazel/Kleaf strict Pixel KMI gate is authoritative. A symbol that is not par
 ## Fail-closed audit hardening
 
 The audit now checks the real Linux source layout under `drivers/net/wireless/realtek/rtl818x/rtl8187` (not a guessed `rtl8187` parent directory), confirms the Kconfig EEPROM select and Makefile target, requires the final merged EEPROM module setting, checks the compiled USB alias for VID:PID 0BDA:8187, verifies the direct dependency files in each staging tree, and compares imported CRCs against the pinned GKI build plus the same build's Module.symvers. Conflicting CRC definitions are a hard failure.
+
+
+## First test-build failure and correction
+
+The first CI test build did not reach compilation. Kleaf's config validator rejected `CONFIG_RTL8187=m` because the symbol resolved to an empty value in the merged config. The GKI baseline disables the Realtek vendor Kconfig menu by default, so the driver symbol must not be requested without enabling its parent menu. The branch now explicitly enables `CONFIG_WLAN_VENDOR_REALTEK=y`, checks the parent Kconfig source chain, and requires that setting in the final merged `.config`. This is a configuration prerequisite, not a reason to weaken KMI checks.
+
+The first run used the earlier, incorrect module output path. The corrected path is `drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko`. The workflow preflight now rejects the old path and checks Bash script syntax plus workflow YAML before spending time on a kernel build.
+
+Final image validation is fail-closed: the audit extracts both ext4 DLKM images, proves the RTL8187 and EEPROM module bytes are present in the image and identical to the audited staged files, verifies same-tree dependency metadata, USB alias, exact vermagic, and rejects early-boot autoload or blocklisting. Required artifacts may not be missing during packaging or upload.
