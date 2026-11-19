@@ -1065,6 +1065,11 @@ jobs:
             grep -E \
               '^(CONFIG_CRYPTO_FIPS140_MOD=|# CONFIG_CRYPTO_FIPS140_MOD is not set|CONFIG_CRYPTO_FIPS140_MERGE_MOD_SECTIONS=)' \
               "$CONFIG" || true
+            echo
+            echo "=== Module compression settings (partition-size investigation) ==="
+            grep -E \
+              '^(CONFIG_MODULE_COMPRESS=|CONFIG_MODULE_COMPRESS_ALL=|CONFIG_MODULE_COMPRESS_(GZIP|XZ|ZSTD)=|CONFIG_MODULE_DECOMPRESS=|# CONFIG_MODULE_COMPRESS)' \
+              "$CONFIG" || true
           } | tee "$REPORT"
           EXPECTED_CONFIG=(
             "CONFIG_MODULES=y"
@@ -1726,6 +1731,11 @@ jobs:
           output = "\n".join(report) + "\n"
           print(output, end="")
           Path("build-report/image-size-audit.txt").write_text(output)
+          if failed:
+              raise SystemExit(
+                  "ERROR: one or more generated images exceed the measured "
+                  "Pixel 8 stock partition capacity. DO NOT FLASH."
+              )
           PY
 
       - name: Upload boot.img for independent image audit
