@@ -225,12 +225,13 @@ jobs:
           grep -qx 'PATCHLEVEL = 1' Makefile
           grep -qx 'SUBLEVEL = 145' Makefile
           echo "KERNEL_COMMON_COMMIT=$ACTUAL" >> "$GITHUB_ENV"
-          echo "EXPECTED_KERNEL_RELEASE=$GKI_KERNEL_RELEASE-ab14691759" >> "$GITHUB_ENV"
+          echo "EXPECTED_KERNEL_RELEASE=$GKI_KERNEL_RELEASE-dirty-ab14691759" >> "$GITHUB_ENV"
           {
             echo "Exact Google kernel/common commit: $ACTUAL"
             echo "Source kernel release: $GKI_KERNEL_RELEASE"
             echo "Matching GKI build ID: 14691759"
-            echo "The kernel source and GKI prebuilt now use the same 6.1.145 base."
+            echo "Custom release includes -dirty because the exact KMI-safe RTL8187 patch changes three tracked source files."
+            echo "Kernel and every staged module must carry the same complete release."
           } | tee "$REPORT_DIR/kernel-common-commit.txt"
 
       - name: Export pinned Repo manifest for Kleaf SCM stamping
@@ -812,6 +813,17 @@ jobs:
           set -euo pipefail
           cd "$WORKSPACE"
           EXPECTED="$EXPECTED_KERNEL_RELEASE"
+
+          IMAGE="out/shusky/dist/Image"
+          test -s "$IMAGE"
+          IMAGE_RELEASE="$(grep -aoE 'Linux version [^ ]+' "$IMAGE" | head -n 1 || true)"
+          if [[ "$IMAGE_RELEASE" != "Linux version $EXPECTED" ]]; then
+            echo "ERROR: kernel Image release does not match the pinned source/GKI build."
+            echo "Expected: Linux version $EXPECTED"
+            echo "Observed: $IMAGE_RELEASE"
+            exit 1
+          fi
+          printf '%s\n' "$IMAGE_RELEASE" | tee "$REPORT_DIR/kernel-image-release.txt"
 
           if grep -Fq "KMI or sublevel mismatch before running make modules_install" "$REPORT_DIR/build.log"; then
             echo "ERROR: Kleaf reported a kernel/KMI sublevel mismatch."
@@ -1552,6 +1564,8 @@ jobs:
           cp -a "$REPORT_DIR/fips-gki-crc-audit.txt" "$PACKAGE/"
           cp -a "$REPORT_DIR/fips-hmac-execution-verification.txt" "$PACKAGE/"
           cp -a "$REPORT_DIR/kernel-module-compatibility.txt" "$PACKAGE/"
+          cp -a "$REPORT_DIR/kernel-image-release.txt" "$PACKAGE/"
+          cp -a "$REPORT_DIR/kleaf-scm-status.txt" "$PACKAGE/"
           cp -a "$GITHUB_WORKSPACE/scripts/audit-rtl8187.sh" "$PACKAGE/"
           cp -a "$GITHUB_WORKSPACE/scripts/audit-dlkm-images.sh" "$PACKAGE/"
           cp -a "$GITHUB_WORKSPACE/scripts/patch-rtl8187-kmi.sh" "$PACKAGE/"
@@ -1578,6 +1592,8 @@ jobs:
           grep -Fxq 'build-report/package/patch-rtl8187-kmi.sh' "$REPORT_DIR/archive-files.txt"
           grep -Fxq 'build-report/package/audit-rtl8187-kmi-base.sh' "$REPORT_DIR/archive-files.txt"
           grep -Fxq 'build-report/package/kleaf-workspace-status.sh' "$REPORT_DIR/archive-files.txt"
+          grep -Fxq 'build-report/package/kernel-image-release.txt' "$REPORT_DIR/archive-files.txt"
+          grep -Fxq 'build-report/package/kleaf-scm-status.txt' "$REPORT_DIR/archive-files.txt"
           grep -Fxq 'build-report/package/SHA256SUMS' "$REPORT_DIR/archive-files.txt"
           sha256sum "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" | tee "$REPORT_DIR/final-artifact-sha256.txt"
 
