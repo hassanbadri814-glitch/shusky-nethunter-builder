@@ -605,6 +605,7 @@ jobs:
           cd "$WORKSPACE"
           python3 <<'PY'
           import os
+          import textwrap
           from pathlib import Path
           build = Path(
               "private/devices/google/shusky/BUILD.bazel"
@@ -691,7 +692,7 @@ jobs:
               )
           if not all(f'"{item}"' in text for item in required_module_outs):
               raise SystemExit("ERROR: required FIPS/RTL8187/EEPROM module_outs entries missing")
-          vendor_list_block = """create_file(
+          vendor_list_block = textwrap.dedent("""create_file(
               name = "shusky_vendor_dlkm_modules_list",
               srcs = [
                   "//private/devices/google/zuma:vendor_dlkm_modules_list",
@@ -699,7 +700,7 @@ jobs:
               ],
               out = "vendor_dlkm.modules",
           )
-          """
+          """)
           if 'name = "shusky_vendor_dlkm_modules_list"' not in text:
               marker = 'create_file(\\n    name = "system_dlkm_modules_list",'
               if marker not in text:
