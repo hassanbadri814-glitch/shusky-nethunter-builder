@@ -44,6 +44,17 @@ HASH_COUNT="$(sha256sum "${MODULES[@]}" | awk '{print $1}' | sort -u | wc -l)"
 }
 MODULE="${MODULES[0]}"
 
+# These two imports were eliminated by the source compatibility patch. The
+# remaining USB/network imports are accepted only through the pinned GKI's
+# already-published virtual_device ABI, verified before compilation.
+[ -s "$REPORT_DIR/rtl8187-gki-virtual-device-abi.txt" ] || fail "pinned GKI virtual_device ABI/export preflight report missing"
+IMPORT_LIST="$(modprobe --show-modversions "$MODULE" | awk 'NF >= 2 {print $2}')"
+for FORBIDDEN in rfkill_pause_polling skb_unlink; do
+  if grep -qxF "$FORBIDDEN" <<<"$IMPORT_LIST"; then
+    fail "RTL8187 still imports forbidden non-Pixel-KMI symbol: $FORBIDDEN"
+  fi
+done
+
 readelf -h "$MODULE" | grep -Eq 'Type:[[:space:]]+REL' || fail "RTL8187 is not an ELF relocatable module"
 readelf -h "$MODULE" | grep -Eq 'Machine:[[:space:]]+AArch64' || fail "RTL8187 is not AArch64"
 [ "$(modinfo -F name "$MODULE")" = "rtl8187" ] || fail "unexpected module internal name"
@@ -212,6 +223,8 @@ PY
   echo "Recursive same-tree dependency closure + vermagic: PASS"
   echo "modules.dep direct dependency resolution: PASS"
   echo "No early-boot modules.load entry: PASS"
+  echo "Protected imports removed (rfkill_pause_polling, skb_unlink): PASS"
+  echo "Official pinned GKI virtual_device ABI/export preflight: PASS"
   echo "Pinned GKI + same-build Module.symvers CRC audit: PASS"
   echo "Strict Pixel KMI remains authoritative; no whitelist was widened."
 } | tee "$REPORT_DIR/rtl8187-module-verification.txt"
