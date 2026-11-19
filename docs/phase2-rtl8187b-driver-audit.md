@@ -82,3 +82,8 @@ This is a testable compatibility hypothesis, not yet a proven result. The next C
 ## ABI preflight correction
 
 The Android 6.1 Shusky branch maintains the GKI-wide additional KMI symbol-list aggregation in the root `BUILD.bazel` filegroup `aarch64_additional_kmi_symbol_lists`; `build.config.gki.aarch64` does not duplicate that list. The audit therefore checks the authoritative Bazel filegroup and verifies that `kernel_aarch64` consumes it, then checks the exact pinned GKI build's `vmlinux.symvers` for every required export. This avoids a false failure caused by checking the wrong configuration source while retaining the strict symbol/export gates.
+
+
+## Exact GKI kernel-release stamping
+
+The first successful compile exposed `-dirty` vermagic because the RTL8187 KMI compatibility patch modifies the pinned `kernel/common` source tree. Kleaf documents `workspace_status.json` in the common kernel directory as the supported override for `SCMVERSION`. The workflow now writes the exact suffix `-android14-11-gfa1d6308d1fe-ab14691759` to `aosp/workspace_status.json` before the build, and all module audits require the complete exact release `6.1.145-android14-11-gfa1d6308d1fe-ab14691759` rather than stripping `-ab` and comparing only a prefix. This does not alter the Pixel KMI lists, exported symbols, FIPS configuration, or device partitions. The next CI run must prove that Kleaf applies this override to every staged module; no artifact is accepted until that check and the downstream audits pass.
