@@ -59,8 +59,7 @@ readelf -h "$MODULE" | grep -Eq 'Type:[[:space:]]+REL' || fail "RTL8187 is not a
 readelf -h "$MODULE" | grep -Eq 'Machine:[[:space:]]+AArch64' || fail "RTL8187 is not AArch64"
 [ "$(modinfo -F name "$MODULE")" = "rtl8187" ] || fail "unexpected module internal name"
 RELEASE="$(modinfo -F vermagic "$MODULE" | awk '{print $1}')"
-RELEASE="${RELEASE%-ab*}"
-[ "$RELEASE" = "$EXPECTED_RELEASE" ] || fail "vermagic $RELEASE != expected $EXPECTED_RELEASE"
+[ "$RELEASE" = "$EXPECTED_RELEASE" ] || fail "vermagic $RELEASE != exact expected $EXPECTED_RELEASE"
 
 # Verify that this module actually advertises the adapter's USB VID:PID.
 if ! modinfo -F alias "$MODULE" | grep -Eiq 'usb:v0BDAp8187'; then
@@ -123,8 +122,6 @@ for path in sorted(visited):
     full = os.path.join(root, path)
     vermagic = subprocess.check_output(["modinfo", "-F", "vermagic", full], text=True).split()[0]
     release = vermagic.split()[0]
-    if "-ab" in release:
-        release = release.split("-ab", 1)[0]
     if release != expected:
         raise SystemExit(f"ERROR: dependency vermagic mismatch: {path}: {release} != {expected}")
 print("Recursive dependency closure:", len(visited), "modules")
@@ -215,7 +212,7 @@ PY
 {
   echo "RTL8187 module: $MODULE"
   echo "SHA256: $(sha256sum "$MODULE" | awk '{print $1}')"
-  echo "Kernel release/vermagic: $RELEASE"
+  echo "Exact kernel release/vermagic: $RELEASE"
   echo "USB alias 0BDA:8187: PASS"
   echo "Declared dependencies: $DEPENDS"
   echo "Module signer: ${RTL_SIGNER:-unsigned}"
