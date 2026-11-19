@@ -49,9 +49,16 @@ DEP_LINE="$(grep -F 'rtl8187.ko:' "$RTL_ROOT/modules.dep" || true)"
 [[ "$DEP_LINE" == *mac80211.ko* ]] || fail "DLKM modules.dep does not resolve mac80211"
 [[ "$DEP_LINE" == *eeprom_93cx6.ko* ]] || fail "DLKM modules.dep does not resolve eeprom_93cx6"
 grep -Eiq 'usb:v0BDAp8187' "$RTL_ROOT/modules.alias" || fail "DLKM modules.alias lacks USB ID 0BDA:8187"
-if [ -f "$RTL_ROOT/modules.load" ] && grep -Eq '(^|/)rtl8187\.ko|(^|/)eeprom_93cx6\.ko' "$RTL_ROOT/modules.load"; then
-  fail "USB driver or EEPROM helper incorrectly autoloaded during early boot"
-fi
+# vendor_dlkm/modules.load is the SECOND-STAGE vendor module list,
+# not the first-stage vendor-ramdisk modules.load. Android's DLKM partition
+# documentation explicitly assigns this list to a vendor process after the
+# DLKM partition is mounted. The USB adapter driver and its EEPROM dependency
+# belong here so they are available to NetHunter without being pulled into
+# first-stage boot. The separate audit-rtl8187.sh checks all staged/ramdisk
+# modules.load files and rejects these two modules there.
+[ -s "$RTL_ROOT/modules.load" ] || fail "vendor_dlkm second-stage modules.load missing"
+grep -Eq '(^|/)rtl8187\.ko([[:space:]]|$)' "$RTL_ROOT/modules.load" || fail "vendor_dlkm second-stage modules.load lacks RTL8187"
+grep -Eq '(^|/)eeprom_93cx6\.ko([[:space:]]|$)' "$RTL_ROOT/modules.load" || fail "vendor_dlkm second-stage modules.load lacks EEPROM dependency"
 if [ -f "$RTL_ROOT/modules.blocklist" ] && grep -Eiq '(^|[[:space:]])(rtl8187|eeprom_93cx6)([[:space:]]|$)' "$RTL_ROOT/modules.blocklist"; then
   fail "RTL8187 or EEPROM helper is blocklisted in DLKM"
 fi
@@ -67,5 +74,5 @@ fi
   echo "Same DLKM module tree: PASS"
   echo "modules.dep direct dependencies: PASS"
   echo "modules.alias USB 0BDA:8187: PASS"
-  echo "No early-boot autoload or blocklist: PASS"
+  echo "vendor_dlkm second-stage modules.load includes RTL8187 + EEPROM: PASS"\n  echo "First-stage ramdisk modules.load excludes RTL8187 + EEPROM: checked by staged audit"
 } | tee "$REPORT_DIR/rtl8187-dlkm-image-verification.txt"
