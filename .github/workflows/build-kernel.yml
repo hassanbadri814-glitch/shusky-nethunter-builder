@@ -1448,14 +1448,25 @@ jobs:
           cp -a "$REPORT_DIR/fips-gki-crc-audit.txt" "$PACKAGE/"
           cp -a "$REPORT_DIR/fips-hmac-execution-verification.txt" "$PACKAGE/"
           cp -a "$REPORT_DIR/kernel-module-compatibility.txt" "$PACKAGE/"
+          cp -a "$GITHUB_WORKSPACE/scripts/audit-rtl8187.sh" "$PACKAGE/"
+          cp -a "$GITHUB_WORKSPACE/scripts/audit-dlkm-images.sh" "$PACKAGE/"
+          {
+            echo "builder_commit=$GITHUB_SHA"
+            echo "kernel_common_commit=$KERNEL_COMMON_COMMIT"
+            echo "expected_kernel_release=$EXPECTED_KERNEL_RELEASE"
+            echo "gki_build_id=14691759"
+            echo "pixel_flash_performed=no"
+          } > "$PACKAGE/BUILD-IDENTITY.txt"
           (
             cd "$PACKAGE"
-            find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+            find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
           )
           zip -qr "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" build-report
           unzip -t "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip"
-          unzip -l "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" | grep -q 'package/dist/rtl8187.ko'
-          unzip -l "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" | grep -q 'package/dist/eeprom_93cx6.ko'
+          unzip -Z1 "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" > "$REPORT_DIR/archive-files.txt"
+          grep -Fxq 'build-report/package/dist/rtl8187.ko' "$REPORT_DIR/archive-files.txt"
+          grep -Fxq 'build-report/package/dist/eeprom_93cx6.ko' "$REPORT_DIR/archive-files.txt"
+          grep -Fxq 'build-report/package/SHA256SUMS' "$REPORT_DIR/archive-files.txt"
           sha256sum "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" | tee "$REPORT_DIR/final-artifact-sha256.txt"
 
       - name: Audit flash image sizes against Pixel 8 stock partition capacities
