@@ -87,3 +87,10 @@ The Android 6.1 Shusky branch maintains the GKI-wide additional KMI symbol-list 
 ## Exact GKI kernel-release stamping
 
 The first successful compile exposed `-dirty` vermagic because the RTL8187 KMI compatibility patch modifies the pinned `kernel/common` source tree. Kleaf documents `workspace_status.json` in the common kernel directory as the supported override for `SCMVERSION`. The workflow now writes the exact suffix `-android14-11-gfa1d6308d1fe-ab14691759` to `aosp/workspace_status.json` before the build, and all module audits require the complete exact release `6.1.145-android14-11-gfa1d6308d1fe-ab14691759` rather than stripping `-ab` and comparing only a prefix. This does not alter the Pixel KMI lists, exported symbols, FIPS configuration, or device partitions. The next CI run must prove that Kleaf applies this override to every staged module; no artifact is accepted until that check and the downstream audits pass.
+
+
+## Kleaf SCM stamping and reusable build cache
+
+The first explicit `workspace_status.json` attempt did not change the staged module vermagic: 547 modules still contained the `-dirty` suffix. The next build therefore does not proceed directly to compilation. It exports the pinned Repo manifest after pinning `kernel/common`, passes that manifest to Kleaf with `--repo_manifest`, and runs a Bazel `--nobuild` preflight. The preflight reads Bazel's `stable-status.txt` and requires the exact SCM suffix for GKI build 14691759 with no `dirty` value. If the stamp is still wrong or cannot be read, the workflow stops before the expensive kernel build.
+
+The Bazel disk cache is restored with a versioned GKI/RTL8187 key and saved in a separate `actions/cache/save` step with `if: always()`. Completed Bazel actions can therefore be reused after a failed compile or audit. The Repo source cache remains separate and continues to retain the synchronized Google source objects.
