@@ -1,0 +1,68 @@
+name: Audit existing Shiba Native FIPS build (no compilation)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: GitHub Actions run ID containing shiba-native-fips-audit-inputs
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  audit-existing-images:
+    name: Audit previously built DLKM images without rebuilding
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout audit scripts
+        uses: actions/checkout@v4
+        with:
+          ref: phase2/rtl8187b-driver-audit
+
+      - name: Install image inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs kmod binutils
+
+      - name: Download preserved build inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: shiba-native-fips-audit-inputs
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: audit-input
+
+      - name: Audit existing DLKM images and modules
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$GITHUB_WORKSPACE/audit-input"
+          VENDOR="$ROOT/out/shusky/dist/vendor_dlkm.img"
+          SYSTEM="$ROOT/out/shusky/dist/system_dlkm.img"
+          RELEASE_FILE="$ROOT/build-report/kernel-image-release.txt"
+          test -s "$VENDOR"
+          test -s "$SYSTEM"
+          test -s "$RELEASE_FILE"
+          EXPECTED="$(awk '/Linux version / {gsub(/^.*Linux version /,""); print $1; exit}' "$RELEASE_FILE")"
+          if [ -z "$EXPECTED" ]; then
+            EXPECTED="6.1.145-android14-11-gfa1d6308d1fe-ab14691759"
+          fi
+          mapfile -t RTL < <(find "$ROOT/out/bazel" -type f -path '*/kernel_images_*/staging/lib/modules/*/kernel/drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko' -print | sort -u)
+          mapfile -t EEPROM < <(find "$ROOT/out/bazel" -type f -path '*/kernel_images_*/staging/lib/modules/*/kernel/drivers/misc/eeprom/eeprom_93cx6.ko' -print | sort -u)
+          test "${#RTL[@]}" -ge 1
+          test "${#EEPROM[@]}" -ge 1
+          mkdir -p audit-report
+          bash scripts/audit-dlkm-images.sh "$VENDOR" "$SYSTEM" "${RTL[0]}" "${EEPROM[0]}" "$EXPECTED" audit-report
+
+      - name: Upload audit-only report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiba-native-fips-dlkm-audit-report
+          path: audit-report/
+          if-no-files-found: warn
+          retention-days: 14
