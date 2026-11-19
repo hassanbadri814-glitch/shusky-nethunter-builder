@@ -11,6 +11,8 @@ REPORT_DIR="${6:?report directory required}"
 mkdir -p "$REPORT_DIR"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# debugfs rdump requires the destination directory to exist on this runner.
+mkdir -p "$TMP/vendor" "$TMP/system"
 fail() { echo "FATAL: $*" >&2; exit 1; }
 
 for image in "$VENDOR_IMAGE" "$SYSTEM_IMAGE"; do
