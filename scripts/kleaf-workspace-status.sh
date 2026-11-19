@@ -5,24 +5,35 @@
 set -Eeuo pipefail
 
 ROOT="$(pwd -P)"
-EXPECTED_COMMIT="${KERNEL_COMMON_COMMIT:?KERNEL_COMMON_COMMIT is required}"
-BUILD="${BUILD_NUMBER:?BUILD_NUMBER is required}"
-
 PINNED_COMMIT="fa1d6308d1fe803c3fdebcd3ee6f7a1155fc3462"
-if [[ "$EXPECTED_COMMIT" != "$PINNED_COMMIT" ]]; then
-  echo "ERROR: refusing SCM normalization for an unrecognized kernel/common commit: $EXPECTED_COMMIT" >&2
+BUILD="14691759"
+MANIFEST="$ROOT/out/manifest.xml"
+
+# Bazel may reuse a server started by an earlier query step. Set the exact
+# status-command environment here rather than relying on the server's inherited
+# environment from the GitHub Actions client.
+if [[ -n "${KERNEL_COMMON_COMMIT:-}" && "$KERNEL_COMMON_COMMIT" != "$PINNED_COMMIT" ]]; then
+  echo "ERROR: workflow kernel/common pin conflicts with SCM stamp pin." >&2
   exit 1
 fi
-if [[ "$BUILD" != "14691759" ]]; then
-  echo "ERROR: BUILD_NUMBER must match the pinned GKI build 14691759; got $BUILD" >&2
+if [[ -n "${BUILD_NUMBER:-}" && "$BUILD_NUMBER" != "$BUILD" ]]; then
+  echo "ERROR: inherited BUILD_NUMBER conflicts with pinned GKI build." >&2
   exit 1
 fi
-if [[ "${KLEAF_USE_KLEAF_LOCALVERSION:-}" != "true" ]]; then
-  echo "ERROR: expected Kleaf's normal localversion calculation to be active." >&2
+if [[ -n "${KLEAF_REPO_MANIFEST:-}" && "$(realpath "$KLEAF_REPO_MANIFEST")" != "$(realpath "$MANIFEST")" ]]; then
+  echo "ERROR: inherited Kleaf Repo manifest points to a different file." >&2
   exit 1
 fi
-if [[ -z "${KLEAF_REPO_MANIFEST:-}" || ! -s "$KLEAF_REPO_MANIFEST" ]]; then
-  echo "ERROR: Kleaf Repo manifest is missing or empty: ${KLEAF_REPO_MANIFEST:-<unset>}" >&2
+if [[ -n "${KLEAF_USE_KLEAF_LOCALVERSION:-}" && "$KLEAF_USE_KLEAF_LOCALVERSION" != "true" ]]; then
+  echo "ERROR: refusing to run with Kleaf localversion calculation disabled." >&2
+  exit 1
+fi
+export KERNEL_COMMON_COMMIT="$PINNED_COMMIT"
+export BUILD_NUMBER="$BUILD"
+export KLEAF_REPO_MANIFEST="$MANIFEST"
+export KLEAF_USE_KLEAF_LOCALVERSION="true"
+if [[ ! -s "$KLEAF_REPO_MANIFEST" ]]; then
+  echo "ERROR: pinned Repo manifest is missing or empty: $KLEAF_REPO_MANIFEST" >&2
   exit 1
 fi
 
