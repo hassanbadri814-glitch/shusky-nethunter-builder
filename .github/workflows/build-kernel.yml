@@ -222,7 +222,7 @@ jobs:
           grep -qx 'PATCHLEVEL = 1' Makefile
           grep -qx 'SUBLEVEL = 145' Makefile
           echo "KERNEL_COMMON_COMMIT=$ACTUAL" >> "$GITHUB_ENV"
-          echo "EXPECTED_KERNEL_RELEASE=$GKI_KERNEL_RELEASE" >> "$GITHUB_ENV"
+          echo "EXPECTED_KERNEL_RELEASE=$GKI_KERNEL_RELEASE-ab14691759" >> "$GITHUB_ENV"
           {
             echo "Exact Google kernel/common commit: $ACTUAL"
             echo "Source kernel release: $GKI_KERNEL_RELEASE"
@@ -734,6 +734,28 @@ jobs:
           echo "Configured GKI and Native FIPS dependency graph: PASS" \
             | tee "$REPORT_DIR/pre-build-verification.txt"
 
+      - name: Pin exact GKI SCM version for Kleaf
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          python3 <<'PY'
+          import json
+          from pathlib import Path
+
+          common = Path("aosp")
+          status = common / "workspace_status.json"
+          expected = "-android14-11-gfa1d6308d1fe-ab14691759"
+          payload = {"SCMVERSION": expected}
+          status.write_text(json.dumps(payload, sort_keys=True) + "\n")
+          actual = json.loads(status.read_text())
+          if actual.get("SCMVERSION") != expected:
+              raise SystemExit("ERROR: Kleaf SCMVERSION override does not match the pinned Pixel 8 GKI release")
+          print("Kleaf workspace_status.json:", status)
+          print("Exact SCMVERSION:", actual["SCMVERSION"])
+          print("Expected full kernel release:", "6.1.145" + actual["SCMVERSION"])
+          PY
+
       - name: Build Shusky Native FIPS kernel
         shell: bash
         run: |
@@ -779,7 +801,6 @@ jobs:
           BAD=0
           for module in "${MODULES[@]}"; do
             release="$(modinfo -F vermagic "$module" | awk '{print $1}')"
-            release="${release%-ab*}"
             if [ "$release" != "$EXPECTED" ]; then
               echo "RELEASE_MISMATCH $module :: $release"
               BAD=1
@@ -874,7 +895,7 @@ jobs:
             echo "Expected kernel release: $EXPECTED"
             echo "Exact kernel/common commit: $KERNEL_COMMON_COMMIT"
             echo "Modules scanned across final initramfs/DLKM staging trees: ${#MODULES[@]}"
-            echo "All module vermagic release prefixes match the exact GKI base."
+            echo "All module vermagic values match the exact GKI release: $EXPECTED."
             echo "FIPS module_layout CRC matches the GKI zsmalloc module."
             echo "FIPS imported-symbol CRCs match GKI build 14691759 vmlinux.symvers."
             echo "FIPS, UFS FIPS, UFS driver, and modules.dep dependency entries verified."
