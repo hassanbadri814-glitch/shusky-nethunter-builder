@@ -1495,12 +1495,16 @@ jobs:
           done
           cp -a "$REPORT_DIR/rtl8187-module-verification.txt" "$PACKAGE/"
           cp -a "$REPORT_DIR/rtl8187-kmi-crc-audit.txt" "$PACKAGE/"
+          cp -a "$REPORT_DIR/rtl8187-kmi-source-patch.txt" "$PACKAGE/"
+          cp -a "$REPORT_DIR/rtl8187-gki-virtual-device-abi.txt" "$PACKAGE/"
           cp -a "$REPORT_DIR/rtl8187-dlkm-image-verification.txt" "$PACKAGE/"
           cp -a "$REPORT_DIR/fips-gki-crc-audit.txt" "$PACKAGE/"
           cp -a "$REPORT_DIR/fips-hmac-execution-verification.txt" "$PACKAGE/"
           cp -a "$REPORT_DIR/kernel-module-compatibility.txt" "$PACKAGE/"
           cp -a "$GITHUB_WORKSPACE/scripts/audit-rtl8187.sh" "$PACKAGE/"
           cp -a "$GITHUB_WORKSPACE/scripts/audit-dlkm-images.sh" "$PACKAGE/"
+          cp -a "$GITHUB_WORKSPACE/scripts/patch-rtl8187-kmi.sh" "$PACKAGE/"
+          cp -a "$GITHUB_WORKSPACE/scripts/audit-rtl8187-kmi-base.sh" "$PACKAGE/"
           {
             echo "builder_commit=$GITHUB_SHA"
             echo "kernel_common_commit=$KERNEL_COMMON_COMMIT"
@@ -1517,6 +1521,10 @@ jobs:
           unzip -Z1 "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" > "$REPORT_DIR/archive-files.txt"
           grep -Fxq 'build-report/package/dist/rtl8187.ko' "$REPORT_DIR/archive-files.txt"
           grep -Fxq 'build-report/package/dist/eeprom_93cx6.ko' "$REPORT_DIR/archive-files.txt"
+          grep -Fxq 'build-report/package/rtl8187-kmi-source-patch.txt' "$REPORT_DIR/archive-files.txt"
+          grep -Fxq 'build-report/package/rtl8187-gki-virtual-device-abi.txt' "$REPORT_DIR/archive-files.txt"
+          grep -Fxq 'build-report/package/patch-rtl8187-kmi.sh' "$REPORT_DIR/archive-files.txt"
+          grep -Fxq 'build-report/package/audit-rtl8187-kmi-base.sh' "$REPORT_DIR/archive-files.txt"
           grep -Fxq 'build-report/package/SHA256SUMS' "$REPORT_DIR/archive-files.txt"
           sha256sum "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" | tee "$REPORT_DIR/final-artifact-sha256.txt"
 
