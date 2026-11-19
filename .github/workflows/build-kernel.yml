@@ -469,9 +469,12 @@ jobs:
           cd "$WORKSPACE"
           RTL_DIR="aosp/drivers/net/wireless/realtek/rtl818x/rtl8187"
           RTL_KCONFIG="aosp/drivers/net/wireless/realtek/rtl818x/Kconfig"
+          REALTEK_KCONFIG="aosp/drivers/net/wireless/realtek/Kconfig"
           test -s "$RTL_DIR/Makefile"
           test -s "$RTL_DIR/dev.c"
           test -s "$RTL_KCONFIG"
+          test -s "$REALTEK_KCONFIG"
+          grep -Fq 'source "drivers/net/wireless/realtek/rtl818x/Kconfig"' "$REALTEK_KCONFIG"
           grep -Eq 'config RTL8187([[:space:]]|$)' "$RTL_KCONFIG"
           grep -Eq 'select EEPROM_93CX6' "$RTL_KCONFIG"
           grep -Eq 'obj-\$\(CONFIG_RTL8187\).*rtl8187\.o' "$RTL_DIR/Makefile"
@@ -497,6 +500,7 @@ jobs:
           CONFIG_CFG80211=m
           CONFIG_MAC80211=m
           CONFIG_USB=y
+          CONFIG_WLAN_VENDOR_REALTEK=y
           CONFIG_RTL8187=m
           CONFIG_EEPROM_93CX6=m
           CONFIG_CRYPTO_FIPS140_MOD=m
@@ -869,6 +873,7 @@ jobs:
             "CONFIG_CFG80211=m"
             "CONFIG_MAC80211=m"
             "CONFIG_USB=y"
+            "CONFIG_WLAN_VENDOR_REALTEK=y"
             "CONFIG_RTL8187=m"
             "CONFIG_EEPROM_93CX6=m"
             "CONFIG_CRYPTO_FIPS140_MOD=m"
