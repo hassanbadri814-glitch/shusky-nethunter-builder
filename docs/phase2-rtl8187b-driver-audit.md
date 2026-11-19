@@ -101,3 +101,5 @@ The Bazel disk cache is restored with a versioned GKI/RTL8187 key and saved in a
 ## Whitespace regression caught by SCM preflight
 
 Run `44442181765` correctly stopped before kernel compilation because removing the redundant RTL8187 rfkill wrapper left an extra blank line at EOF in `rfkill.c`. Google's source diff check rejected it. The KMI patch script now trims trailing whitespace from that edited file and writes exactly one final newline. The strict `git diff --check` remains enabled; the check itself is not weakened.
+
+The corrective patch and documentation are committed. The next build-authorized CI run must first demonstrate that this source preflight now passes; no phone operation is part of the run.
