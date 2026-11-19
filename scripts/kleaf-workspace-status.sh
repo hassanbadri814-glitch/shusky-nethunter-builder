@@ -55,7 +55,7 @@ EXPECTED_FILES="$(printf '%s\n' \
   'drivers/net/wireless/realtek/rtl818x/rtl8187/rfkill.h' | LC_ALL=C sort)"
 ACTUAL_FILES="$(git -C "$ROOT/aosp" diff --name-only | LC_ALL=C sort)"
 if [[ "$ACTUAL_FILES" != "$EXPECTED_FILES" ]]; then
-  echo "ERROR: kernel/common has an unexpected tracked source diff; refusing to normalize SCM identity." >&2
+  echo "ERROR: kernel/common has an unexpected tracked source diff; refusing to accept this SCM state." >&2
   echo "Expected changed files:" >&2
   printf '%s\n' "$EXPECTED_FILES" >&2
   echo "Actual changed files:" >&2
