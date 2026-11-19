@@ -803,7 +803,7 @@ jobs:
           set -euo pipefail
           cd "$WORKSPACE"
           tools/bazel run \
-            --repo_manifest "$WORKSPACE:$(realpath out/manifest.xml)" \
+            --repo_manifest "$(realpath out/manifest.xml)" \
             --config=stamp \
             --config=shusky \
             --kernel_package=@//aosp \
