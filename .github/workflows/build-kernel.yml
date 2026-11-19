@@ -615,6 +615,14 @@ jobs:
           shusky_ramdisk = Path(
               "private/devices/google/shusky/vendor_ramdisk.modules.shusky"
           )
+          vendor_dlkm_list = Path(
+              "private/devices/google/shusky/vendor_dlkm.modules.shusky"
+          )
+          vendor_dlkm_patterns = [
+              "^kernel/drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko",
+              "^kernel/drivers/misc/eeprom/eeprom_93cx6.ko",
+          ]
+          vendor_dlkm_list.write_text("\\n".join(vendor_dlkm_patterns) + "\\n")
           text = build.read_text()
           fips_label = os.environ["FIPS_ABI_LABEL"]
           virtual_label = os.environ["VIRTUAL_ABI_LABEL"]
@@ -683,6 +691,23 @@ jobs:
               )
           if not all(f'"{item}"' in text for item in required_module_outs):
               raise SystemExit("ERROR: required FIPS/RTL8187/EEPROM module_outs entries missing")
+          vendor_list_marker = (
+              'name = "vendor_dlkm_modules_list",\\n'
+              '    srcs = ["//private/devices/google/zuma:vendor_dlkm_modules_list"],'
+          )
+          vendor_list_replacement = (
+              'name = "vendor_dlkm_modules_list",\\n'
+              '    srcs = [\\n'
+              '        "//private/devices/google/zuma:vendor_dlkm_modules_list",\\n'
+              '        "vendor_dlkm.modules.shusky",\\n'
+              '    ],'
+          )
+          if vendor_list_replacement not in text:
+              if vendor_list_marker not in text:
+                  raise SystemExit("ERROR: cannot locate vendor_dlkm_modules_list source declaration")
+              text = text.replace(vendor_list_marker, vendor_list_replacement, 1)
+          if "vendor_dlkm.modules.shusky" not in text:
+              raise SystemExit("ERROR: Shusky RTL8187/EEPROM vendor DLKM filter was not wired")
           build.write_text(text)
           fips_entry = "kernel/crypto/fips140.ko"
           ufs_fips_entry = "extra/private/google-modules/soc/gs/drivers/ufs/ufs-pixel-fips140.ko"
@@ -719,6 +744,7 @@ jobs:
           print("FIPS ABI:", fips_label)
           print("Existing official GKI virtual_device ABI:", virtual_label)
           print("FIPS module added to module_outs.")
+          print("RTL8187 and EEPROM added to the Shusky vendor_dlkm_modules_list.")
           print("FIPS added to Zuma ramdisk list.")
           print("Existing Zuma module ordering preserved.")
           PY
