@@ -16,7 +16,7 @@ done
 
 python3 - "$DEV" "$RFKILL_C" "$RFKILL_H" "$MAC80211" "$CFG80211" "$REPORT" <<'PY'
 from pathlib import Path
-import sys
+import re, sys
 
 dev_path, rfkill_c_path, rfkill_h_path, mac80211_path, cfg80211_path, report_path = map(Path, sys.argv[1:])
 dev = dev_path.read_text()
@@ -100,10 +100,10 @@ wiphy_start = cfg80211.find("void wiphy_unregister")
 if wiphy_start < 0 or "rfkill_unregister(rdev->wiphy.rfkill)" not in cfg80211[wiphy_start:wiphy_start + 5000]:
     raise SystemExit("ERROR: wiphy_unregister() does not visibly unregister rfkill")
 
-if "skb_unlink(" in dev or "rfkill_pause_polling" in dev + rfkill_c + rfkill_h:
+if re.search(r"(?<!_)skb_unlink\\s*\\(", dev) or "rfkill_pause_polling" in dev + rfkill_c + rfkill_h:
     raise SystemExit("ERROR: protected skb_unlink/rfkill_pause_polling reference remains")
-if dev.count("__skb_unlink(skb, &priv->rx_queue)") != 2:
-    raise SystemExit("ERROR: expected exactly two locked __skb_unlink replacements")
+if dev.count("__skb_unlink(skb, &priv->rx_queue)") != 3:
+    raise SystemExit("ERROR: expected original RX dequeue plus two locked __skb_unlink sites")
 
 dev_path.write_text(dev)
 rfkill_c_path.write_text(rfkill_c)
