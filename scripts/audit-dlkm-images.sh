@@ -34,8 +34,7 @@ sha256sum -c <(printf '%s  %s\n' "$(sha256sum "$EEPROM_STAGED" | awk '{print $1}
 for module in "${RTL_FILES[0]}" "${EEPROM_FILES[0]}"; do
   readelf -h "$module" | grep -Eq 'Machine:[[:space:]]+AArch64' || fail "non-AArch64 module in DLKM image: $module"
   release="$(modinfo -F vermagic "$module" | awk '{print $1}')"
-  release="${release%-ab*}"
-  [ "$release" = "$EXPECTED_RELEASE" ] || fail "DLKM module vermagic mismatch: $module ($release)"
+  [ "$release" = "$EXPECTED_RELEASE" ] || fail "DLKM module exact vermagic mismatch: $module ($release)"
 done
 
 RTL_ROOT="${RTL_FILES[0]%/kernel/drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko}"
