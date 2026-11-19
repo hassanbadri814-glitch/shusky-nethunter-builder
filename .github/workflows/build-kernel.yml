@@ -696,7 +696,7 @@ jobs:
           # for each generated output in a package.
           import re
           pattern = re.compile(
-              r'(create_file\\(\\s*name = "vendor_dlkm_modules_list",\\s*srcs = \\[)(.*?)(\\],\\s*out = "vendor_dlkm\\.modules",\\s*\\))',
+              r'(create_file\(\s*name = "vendor_dlkm_modules_list",\s*srcs = \[)(.*?)(\],\s*out = "vendor_dlkm\.modules",\s*\))',
               re.S,
           )
           matches = list(pattern.finditer(text))
@@ -707,7 +707,7 @@ jobs:
           match = matches[0]
           srcs = match.group(2)
           if '"vendor_dlkm.modules.shusky"' not in srcs:
-              srcs = srcs.rstrip() + '\\n        "vendor_dlkm.modules.shusky",\\n    '
+              srcs = srcs.rstrip() + '\n        "vendor_dlkm.modules.shusky",\n    '
               text = text[:match.start(2)] + srcs + text[match.end(2):]
           if text.count('name = "vendor_dlkm_modules_list"') != 1:
               raise SystemExit("ERROR: duplicate vendor_dlkm_modules_list rule")
