@@ -77,3 +77,8 @@ The follow-up route is deliberately narrow:
 - The post-build module audit rejects any remaining `skb_unlink` or `rfkill_pause_polling` import. The strict Kleaf KMI gate and GKI CRC checks remain mandatory.
 
 This is a testable compatibility hypothesis, not yet a proven result. The next CI run must prove the official ABI/export set and pass the unchanged strict KMI gate. No phone flashing is performed.
+
+
+## ABI preflight correction
+
+The Android 6.1 Shusky branch maintains the GKI-wide additional KMI symbol-list aggregation in the root `BUILD.bazel` filegroup `aarch64_additional_kmi_symbol_lists`; `build.config.gki.aarch64` does not duplicate that list. The audit therefore checks the authoritative Bazel filegroup and verifies that `kernel_aarch64` consumes it, then checks the exact pinned GKI build's `vmlinux.symvers` for every required export. This avoids a false failure caused by checking the wrong configuration source while retaining the strict symbol/export gates.
