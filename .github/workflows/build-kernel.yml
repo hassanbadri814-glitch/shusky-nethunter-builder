@@ -1359,18 +1359,28 @@ jobs:
               echo "FIPS entry found."
               python3 - "$MODULES_LOAD" <<'PY'
           import sys
-          lines = [line.strip() for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
-          def position(name):
-              matches = [i for i, line in enumerate(lines) if line.rsplit("/", 1)[-1] == name]
-              if len(matches) != 1:
-                  raise SystemExit(f"ERROR: expected exactly one {name} entry in modules.load; found {len(matches)}")
-              return matches[0]
-          fips = position("fips140.ko")
-          pixel = position("ufs-pixel-fips140.ko")
-          ufs = position("ufs-exynos-gs.ko")
-          if not (fips < pixel < ufs):
-              raise SystemExit(f"ERROR: unsafe FIPS/UFS modules.load order: fips={fips}, pixel={pixel}, ufs={ufs}")
-          print(f"FIPS/UFS load order PASS: fips140({fips}) < ufs-pixel-fips140({pixel}) < ufs-exynos-gs({ufs})")
+          from pathlib import Path
+          load_path = Path(sys.argv[1])
+          lines = [line.strip() for line in load_path.open(encoding="utf-8") if line.strip()]
+          def entries(name):
+              return [line for line in lines if line.rsplit("/", 1)[-1] == name]
+          for name in ("fips140.ko", "ufs-pixel-fips140.ko", "ufs-exynos-gs.ko"):
+              found = entries(name)
+              if len(found) != 1:
+                  raise SystemExit(f"ERROR: expected exactly one {name} entry in modules.load; found {len(found)}")
+          dep_path = load_path.with_name("modules.dep")
+          if not dep_path.is_file():
+              raise SystemExit(f"ERROR: matching modules.dep is missing beside {load_path}")
+          consumer = entries("ufs-exynos-gs.ko")[0]
+          provider = entries("ufs-pixel-fips140.ko")[0]
+          dep_lines = [line.strip() for line in dep_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+          matches = [line for line in dep_lines if line.split(":", 1)[0] == consumer]
+          if len(matches) != 1:
+              raise SystemExit(f"ERROR: expected one modules.dep record for {consumer}; found {len(matches)}")
+          dependencies = matches[0].split(":", 1)[1].split()
+          if provider not in dependencies:
+              raise SystemExit(f"ERROR: {consumer} does not declare {provider} in modules.dep")
+          print("FIPS/UFS dependency PASS: all three modules are in modules.load and modules.dep maps UFS consumer to Pixel FIPS provider.")
           PY
               cp "$MODULES_LOAD" \
                 "$REPORT_DIR/modules-load-${INDEX}.txt"
