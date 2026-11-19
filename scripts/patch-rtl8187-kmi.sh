@@ -92,6 +92,10 @@ rfkill_c = replace_once(rfkill_c, old_exit_fn, "", "RTL8187 rfkill exit function
 old_decl_fn = "void rtl8187_rfkill_exit(struct ieee80211_hw *hw);\n"
 rfkill_h = replace_once(rfkill_h, old_decl_fn, "", "RTL8187 rfkill exit declaration")
 
+# Removing the final rfkill wrapper can leave its former separator as an extra
+# blank line at EOF. Keep the source formatting clean for the strict diff check.
+rfkill_c = rfkill_c.rstrip() + "\n"
+
 # Prove the lifecycle that now owns polling teardown.
 unreg_start = mac80211.find("void ieee80211_unregister_hw")
 if unreg_start < 0 or "wiphy_unregister(" not in mac80211[unreg_start:unreg_start + 10000]:
