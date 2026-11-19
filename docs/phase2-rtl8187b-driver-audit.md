@@ -19,7 +19,7 @@ The integration is isolated to `phase2/rtl8187b-driver-audit`. The main branch a
    - `drivers/misc/eeprom/eeprom_93cx6.ko`
    - existing `crypto/fips140.ko` remains included.
 3. The final merged kernel config must confirm `CONFIG_RTL8187=m` and `CONFIG_EEPROM_93CX6=m|y`; a fragment line alone is not accepted as proof.
-4. The workflow keeps the strict Pixel KMI symbol list and the existing supplemental FIPS ABI list. It does not automatically widen the KMI whitelist for RTL8187.
+4. The workflow keeps the strict Pixel KMI base and the supplemental FIPS ABI. For RTL8187, it may reference Google's already-published `abi_gki_aarch64_virtual_device` list only after the exact pinned GKI source and GKI build's `vmlinux.symvers` prove that every required symbol is already part of that official GKI ABI/export set. No ad-hoc symbols are added, no Pixel ABI file is edited, and strict KMI enforcement remains enabled.
 5. Existing Native FIPS, UFS/FIPS module dependency, HMAC, KernelSU-inline-disabled and image-size checks remain in the build workflow.
 6. A dedicated audit script checks the built module's AArch64 ELF type, exact kernel release/vermagic, EEPROM/mac80211 dependencies, generated `modules.dep`, absence from early-boot `modules.load`, and imported-symbol CRCs.
 7. RTL8187 and EEPROM modules are packaged with the build outputs. The USB driver is intentionally not placed in the early boot ramdisk; it is to be loaded on demand.
@@ -62,3 +62,17 @@ Final image validation is fail-closed: the audit extracts both ext4 DLKM images,
 ## Strict verification run
 
 A new isolated CI run is authorized after the Realtek parent-menu correction and fail-closed audit changes. This run must pass the source/Kconfig preflight, merged-config checks, exact module output and dependency audits, strict Pixel KMI, pinned GKI CRC checks, FIPS/UFS load-order checks, ext4 DLKM image extraction and module hash comparison, partition-capacity checks, and verified artifact packaging. A failure at any gate rejects the artifact. No phone flashing is part of this workflow.
+
+
+## Second KMI investigation — targeted compatibility route
+
+The first real RTL8187 build reached the strict KMI gate and identified 12 imports outside the Shusky Pixel+FIPS symbol-list union. The driver itself compiled; the artifact was correctly rejected.
+
+The follow-up route is deliberately narrow:
+
+- Ten of the imports are USB/network-core symbols listed in Google's published `abi_gki_aarch64_virtual_device` ABI. The workflow now checks that this exact ABI file is part of the pinned GKI source build and that all ten symbols are actually exported by GKI build 14691759's `vmlinux.symvers` before compilation. Only then is that existing upstream ABI list referenced as an additional list; no symbol is manually appended.
+- The driver's two remaining imports are removed at source level. The two `skb_unlink()` sites are replaced with the equivalent in-header `__skb_unlink()` operation while taking the same queue spinlock used by `skb_unlink()`. The redundant RTL8187 rfkill stop wrapper is removed because `ieee80211_unregister_hw()` calls `wiphy_unregister()`, which unregisters rfkill and cancels its polling work. The patch script verifies these lifecycle calls in the pinned source before changing files.
+- The source patch is exact-match and fail-closed: if expected source context differs, the workflow stops rather than applying a partial or guessed patch.
+- The post-build module audit rejects any remaining `skb_unlink` or `rfkill_pause_polling` import. The strict Kleaf KMI gate and GKI CRC checks remain mandatory.
+
+This is a testable compatibility hypothesis, not yet a proven result. The next CI run must prove the official ABI/export set and pass the unchanged strict KMI gate. No phone flashing is performed.
