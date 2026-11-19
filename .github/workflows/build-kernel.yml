@@ -187,6 +187,21 @@ jobs:
             exit 1
           fi
 
+      - name: Export pinned Repo manifest for Kleaf SCM stamping
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WORKSPACE"
+          mkdir -p out
+          repo manifest -r > out/manifest.xml
+          test -s out/manifest.xml
+          grep -q 'path="aosp"' out/manifest.xml
+          {
+            echo "Repo manifest exported for Kleaf SCM stamping."
+            echo "Manifest: $WORKSPACE/out/manifest.xml"
+            echo "Kernel/common project path: aosp"
+          } | tee "$REPORT_DIR/repo-manifest-status.txt"
+
       - name: Pin exact Google GKI kernel/common source revision
         shell: bash
         run: |
@@ -230,16 +245,16 @@ jobs:
             echo "The kernel source and GKI prebuilt now use the same 6.1.145 base."
           } | tee "$REPORT_DIR/kernel-common-commit.txt"
 
-      # Persist Bazel's action cache between runs. The Repo cache above
-      # separately retains Git objects and the pinned kernel history.
+      # Persist Bazel's action cache between runs, including when a later
+      # audit fails. The save step at the end runs with always().
       - name: Restore Bazel disk cache
         id: bazel-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: workspace/.bazel-disk-cache
-          key: bazel-${{ runner.os }}-shusky-${{ github.sha }}
+          key: bazel-${{ runner.os }}-shusky-gki14691759-rtl8187-v2-${{ github.sha }}
           restore-keys: |
-            bazel-${{ runner.os }}-shusky-
+            bazel-${{ runner.os }}-shusky-gki14691759-rtl8187-v2-
 
       - name: Prepare build reports
         shell: bash
@@ -762,6 +777,7 @@ jobs:
           set -euo pipefail
           cd "$WORKSPACE"
           tools/bazel run \
+            --repo_manifest "$WORKSPACE:$(realpath out/manifest.xml)" \
             --config=stamp \
             --config=shusky \
             --kernel_package=@//aosp \
@@ -1671,6 +1687,15 @@ jobs:
           if-no-files-found: error
           compression-level: 6
           retention-days: 14
+
+      # Save even if compilation or a later audit fails, so the next attempt
+      # can reuse completed Bazel actions instead of rebuilding from scratch.
+      - name: Save Bazel disk cache
+        if: always() && steps.bazel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: workspace/.bazel-disk-cache
+          key: ${{ steps.bazel-cache.outputs.cache-primary-key }}
 
       - name: Upload Native FIPS build artifacts
         if: success()
