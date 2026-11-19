@@ -13,9 +13,9 @@ The USB ID is a driver-match clue, not proof of the exact silicon revision or au
 
 The integration is isolated to `phase2/rtl8187b-driver-audit`. The main branch and phone have not been changed.
 
-1. Native FIPS defconfig fragment now requests `CONFIG_RTL8187=m`.
+1. Native FIPS defconfig fragment now requests `CONFIG_RTL8187=m and CONFIG_EEPROM_93CX6=m`.
 2. Shusky `module_outs` integration adds:
-   - `drivers/net/wireless/realtek/rtl8187/rtl8187.ko`
+   - `drivers/net/wireless/realtek/rtl818x/rtl8187/rtl8187.ko`
    - `drivers/misc/eeprom/eeprom_93cx6.ko`
    - existing `crypto/fips140.ko` remains included.
 3. The final merged kernel config must confirm `CONFIG_RTL8187=m` and `CONFIG_EEPROM_93CX6=m|y`; a fragment line alone is not accepted as proof.
@@ -43,3 +43,8 @@ The Bazel/Kleaf strict Pixel KMI gate is authoritative. A symbol that is not par
 - Build artifact: not yet produced.
 - Pixel 8 USB/monitor/injection test: not yet performed.
 - Phone flash or partition change: none.
+
+
+## Fail-closed audit hardening
+
+The audit now checks the real Linux source layout under `drivers/net/wireless/realtek/rtl818x/rtl8187` (not a guessed `rtl8187` parent directory), confirms the Kconfig EEPROM select and Makefile target, requires the final merged EEPROM module setting, checks the compiled USB alias for VID:PID 0BDA:8187, verifies the direct dependency files in each staging tree, and compares imported CRCs against the pinned GKI build plus the same build's Module.symvers. Conflicting CRC definitions are a hard failure.
