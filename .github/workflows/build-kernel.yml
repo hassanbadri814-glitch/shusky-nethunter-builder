@@ -41,6 +41,8 @@ jobs:
           bash -n "$GITHUB_WORKSPACE/scripts/audit-dlkm-images.sh"
           bash -n "$GITHUB_WORKSPACE/scripts/patch-rtl8187-kmi.sh"
           bash -n "$GITHUB_WORKSPACE/scripts/audit-rtl8187-kmi-base.sh"
+          bash -n "$GITHUB_WORKSPACE/scripts/kleaf-workspace-status.sh"
+          chmod +x "$GITHUB_WORKSPACE/scripts/kleaf-workspace-status.sh"
           ruby -e 'require "yaml"; YAML.load_file(ARGV.fetch(0))' "$GITHUB_WORKSPACE/.github/workflows/build-kernel.yml"
           python3 <<'PY'
           from pathlib import Path
@@ -55,6 +57,7 @@ jobs:
               "scripts/audit-dlkm-images.sh",
               "scripts/patch-rtl8187-kmi.sh",
               "scripts/audit-rtl8187-kmi-base.sh",
+              "scripts/kleaf-workspace-status.sh",
               "additional_kmi_symbol_lists",
               "abi_gki_aarch64_virtual_device",
               "VIRTUAL_ABI_LABEL",
@@ -749,61 +752,46 @@ jobs:
           echo "Configured GKI and Native FIPS dependency graph: PASS" \
             | tee "$REPORT_DIR/pre-build-verification.txt"
 
-      - name: Pin exact GKI SCM version for Kleaf
+      - name: Verify actual Kleaf SCM status before compiling
         shell: bash
+        env:
+          BUILD_NUMBER: "14691759"
+          KLEAF_REPO_MANIFEST: \${{ github.workspace }}/workspace/out/manifest.xml
+          KLEAF_USE_KLEAF_LOCALVERSION: "true"
         run: |
           set -euo pipefail
           cd "$WORKSPACE"
-          python3 <<'PY'
-          import json
-          from pathlib import Path
-
-          common = Path("aosp")
-          status = common / "workspace_status.json"
-          expected = "-android14-11-gfa1d6308d1fe-ab14691759"
-          payload = {"SCMVERSION": expected}
-          status.write_text(json.dumps(payload, sort_keys=True) + "\n")
-          actual = json.loads(status.read_text())
-          if actual.get("SCMVERSION") != expected:
-              raise SystemExit("ERROR: Kleaf SCMVERSION override does not match the pinned Pixel 8 GKI release")
-          print("Kleaf workspace_status.json:", status)
-          print("Exact SCMVERSION:", actual["SCMVERSION"])
-          print("Expected full kernel release:", "6.1.145" + actual["SCMVERSION"])
-          PY
-
-      - name: Verify Kleaf SCM override before compiling
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$WORKSPACE"
-          python3 - "$EXPECTED_KERNEL_RELEASE" <<'PY'
+          test -s out/manifest.xml
+          "$GITHUB_WORKSPACE/scripts/kleaf-workspace-status.sh" | tee "$REPORT_DIR/kleaf-scm-status.txt"
+          python3 - "$REPORT_DIR/kleaf-scm-status.txt" "$EXPECTED_KERNEL_RELEASE" <<'PY'
           import json, sys
           from pathlib import Path
 
-          expected = sys.argv[1]
-          status = Path("aosp/workspace_status.json")
-          if not status.is_file():
-              raise SystemExit(f"ERROR: Kleaf SCM override file is missing: {status}")
-          payload = json.loads(status.read_text())
-          actual = payload.get("SCMVERSION")
-          if actual != expected.removeprefix("6.1.145"):
-              raise SystemExit(
-                  f"ERROR: wrong Kleaf SCMVERSION override: expected "
-                  f"{expected.removeprefix('6.1.145')!r}, observed {actual!r}"
-              )
-          if "dirty" in actual:
-              raise SystemExit(f"ERROR: dirty SCM override: {actual!r}")
-          print("Kleaf SCM override verified:", actual)
-          print("Final module vermagic will be checked after the real build.")
+          lines = Path(sys.argv[1]).read_text().splitlines()
+          expected = sys.argv[2]
+          prefix = "STABLE_SCMVERSIONS "
+          matches = [line for line in lines if line.startswith(prefix)]
+          if len(matches) != 1:
+              raise SystemExit("ERROR: normalized Kleaf SCM status record missing or duplicated")
+          versions = json.loads(matches[0][len(prefix):])
+          expected_scm = expected.removeprefix("6.1.145-android14-11")
+          actual = versions.get("aosp")
+          if actual != expected_scm:
+              raise SystemExit(f"ERROR: Kleaf aosp SCM is {actual!r}; expected {expected_scm!r}")
+          print("Effective Kleaf aosp SCM version:", actual)
+          print("Pinned kernel/common commit, exact three-file KMI patch, and GKI build ID verified.")
           PY
 
       - name: Build Shusky Native FIPS kernel
         shell: bash
+        env:
+          BUILD_NUMBER: "14691759"
         run: |
           set -euo pipefail
           cd "$WORKSPACE"
           tools/bazel run \
             --repo_manifest "$(realpath out/manifest.xml)" \
+            --workspace_status_command="$GITHUB_WORKSPACE/scripts/kleaf-workspace-status.sh" \
             --config=stamp \
             --config=shusky \
             --kernel_package=@//aosp \
@@ -1568,6 +1556,7 @@ jobs:
           cp -a "$GITHUB_WORKSPACE/scripts/audit-dlkm-images.sh" "$PACKAGE/"
           cp -a "$GITHUB_WORKSPACE/scripts/patch-rtl8187-kmi.sh" "$PACKAGE/"
           cp -a "$GITHUB_WORKSPACE/scripts/audit-rtl8187-kmi-base.sh" "$PACKAGE/"
+          cp -a "$GITHUB_WORKSPACE/scripts/kleaf-workspace-status.sh" "$PACKAGE/"
           {
             echo "builder_commit=$GITHUB_SHA"
             echo "kernel_common_commit=$KERNEL_COMMON_COMMIT"
@@ -1588,6 +1577,7 @@ jobs:
           grep -Fxq 'build-report/package/rtl8187-gki-virtual-device-abi.txt' "$REPORT_DIR/archive-files.txt"
           grep -Fxq 'build-report/package/patch-rtl8187-kmi.sh' "$REPORT_DIR/archive-files.txt"
           grep -Fxq 'build-report/package/audit-rtl8187-kmi-base.sh' "$REPORT_DIR/archive-files.txt"
+          grep -Fxq 'build-report/package/kleaf-workspace-status.sh' "$REPORT_DIR/archive-files.txt"
           grep -Fxq 'build-report/package/SHA256SUMS' "$REPORT_DIR/archive-files.txt"
           sha256sum "$WORKSPACE/shiba-nethunter-native-fips-build-test.zip" | tee "$REPORT_DIR/final-artifact-sha256.txt"
 
