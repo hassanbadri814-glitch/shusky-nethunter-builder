@@ -225,13 +225,15 @@ jobs:
           grep -qx 'PATCHLEVEL = 1' Makefile
           grep -qx 'SUBLEVEL = 145' Makefile
           echo "KERNEL_COMMON_COMMIT=$ACTUAL" >> "$GITHUB_ENV"
-          echo "EXPECTED_KERNEL_RELEASE=$GKI_KERNEL_RELEASE-dirty-ab14691759" >> "$GITHUB_ENV"
+          echo "EXPECTED_KERNEL_RELEASE=$GKI_KERNEL_RELEASE-ab14691759" >> "$GITHUB_ENV"
+          echo "EXPECTED_KERNEL_SCM=-gfa1d6308d1fe-dirty-ab14691759" >> "$GITHUB_ENV"
           {
             echo "Exact Google kernel/common commit: $ACTUAL"
             echo "Source kernel release: $GKI_KERNEL_RELEASE"
             echo "Matching GKI build ID: 14691759"
-            echo "Custom release includes -dirty because the exact KMI-safe RTL8187 patch changes three tracked source files."
-            echo "Kernel and every staged module must carry the same complete release."
+            echo "Kernel Image and GKI-derived modules retain the official prebuilt release: $GKI_KERNEL_RELEASE-ab14691759."
+            echo "Kleaf SCM independently records the three tracked RTL8187 source edits as -gfa1d6308d1fe-dirty-ab14691759."
+            echo "The SCM dirty marker is not assumed to be part of the prebuilt kernel/module vermagic."
           } | tee "$REPORT_DIR/kernel-common-commit.txt"
 
       - name: Export pinned Repo manifest for Kleaf SCM stamping
@@ -764,18 +766,17 @@ jobs:
           cd "$WORKSPACE"
           test -s out/manifest.xml
           "$GITHUB_WORKSPACE/scripts/kleaf-workspace-status.sh" | tee "$REPORT_DIR/kleaf-scm-status.txt"
-          python3 - "$REPORT_DIR/kleaf-scm-status.txt" "$EXPECTED_KERNEL_RELEASE" <<'PY'
+          python3 - "$REPORT_DIR/kleaf-scm-status.txt" "$EXPECTED_KERNEL_SCM" <<'PY'
           import json, sys
           from pathlib import Path
 
           lines = Path(sys.argv[1]).read_text().splitlines()
-          expected = sys.argv[2]
+          expected_scm = sys.argv[2]
           prefix = "STABLE_SCMVERSIONS "
           matches = [line for line in lines if line.startswith(prefix)]
           if len(matches) != 1:
               raise SystemExit("ERROR: normalized Kleaf SCM status record missing or duplicated")
           versions = json.loads(matches[0][len(prefix):])
-          expected_scm = expected.removeprefix("6.1.145-android14-11")
           actual = versions.get("aosp")
           if actual != expected_scm:
               raise SystemExit(f"ERROR: Kleaf aosp SCM is {actual!r}; expected {expected_scm!r}")
