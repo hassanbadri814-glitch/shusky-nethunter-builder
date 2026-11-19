@@ -1,6 +1,11 @@
 name: Audit existing Shiba Native FIPS build (no compilation)
 
 on:
+  push:
+    branches:
+      - phase2/rtl8187b-driver-audit
+    paths:
+      - .github/workflows/audit-existing-build.yml
   workflow_dispatch:
     inputs:
       source_run_id:
@@ -32,7 +37,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: shiba-native-fips-audit-inputs
-          run-id: ${{ inputs.source_run_id }}
+          run-id: ${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || '44540506888' }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: audit-input
 
