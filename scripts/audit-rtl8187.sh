@@ -8,6 +8,11 @@ EXPECTED_RELEASE="${2:?expected kernel release required}"
 REPORT_DIR="${3:?report directory required}"
 CONFIG="${4:?final kernel config path required}"
 GKI_BUILD_ID="${5:-14691759}"
+# FIPS_CONFIG is exported relative to WORKSPACE/out, while this script is
+# invoked from the builder repository root. Resolve it against WORKSPACE.
+if [[ "$CONFIG" != /* ]]; then
+  CONFIG="$WORKSPACE/$CONFIG"
+fi
 mkdir -p "$REPORT_DIR"
 
 fail() { echo "FATAL: $*" >&2; exit 1; }
