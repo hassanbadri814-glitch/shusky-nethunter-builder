@@ -700,8 +700,12 @@ jobs:
           # in the actual early-boot module list as well.
           if ufs_driver_entry not in zuma_lines:
               raise SystemExit("ERROR: UFS Exynos driver is absent from Zuma ramdisk list")
-          if ufs_fips_entry not in zuma_lines:
-              zuma_lines.insert(zuma_lines.index(ufs_driver_entry), ufs_fips_entry)
+          # Normalize even when the provider already exists in the wrong position.
+          # Remove duplicate/old positions and insert exactly once before its consumer.
+          zuma_lines = [line for line in zuma_lines if line != ufs_fips_entry]
+          zuma_lines.insert(zuma_lines.index(ufs_driver_entry), ufs_fips_entry)
+          if zuma_lines.count(ufs_fips_entry) != 1:
+              raise SystemExit("ERROR: UFS Pixel FIPS provider must appear exactly once")
           if zuma_lines.index(ufs_fips_entry) >= zuma_lines.index(ufs_driver_entry):
               raise SystemExit("ERROR: UFS Pixel FIPS provider must precede UFS Exynos driver")
           zuma_ramdisk.write_text("\n".join(zuma_lines) + "\n")
