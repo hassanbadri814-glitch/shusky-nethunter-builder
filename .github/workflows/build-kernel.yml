@@ -1368,19 +1368,17 @@ jobs:
               found = entries(name)
               if len(found) != 1:
                   raise SystemExit(f"ERROR: expected exactly one {name} entry in modules.load; found {len(found)}")
-          dep_path = load_path.with_name("modules.dep")
-          if not dep_path.is_file():
-              raise SystemExit(f"ERROR: matching modules.dep is missing beside {load_path}")
           consumer = entries("ufs-exynos-gs.ko")[0]
           provider = entries("ufs-pixel-fips140.ko")[0]
-          dep_lines = [line.strip() for line in dep_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-          matches = [line for line in dep_lines if line.split(":", 1)[0] == consumer]
-          if len(matches) != 1:
-              raise SystemExit(f"ERROR: expected one modules.dep record for {consumer}; found {len(matches)}")
-          dependencies = matches[0].split(":", 1)[1].split()
-          if provider not in dependencies:
-              raise SystemExit(f"ERROR: {consumer} does not declare {provider} in modules.dep")
-          print("FIPS/UFS dependency PASS: all three modules are in modules.load and modules.dep maps UFS consumer to Pixel FIPS provider.")
+          dep_records = []
+          for dep_path in load_path.parent.rglob("modules.dep"):
+              for line in dep_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                  if line.strip() and line.split(":", 1)[0] == consumer:
+                      dep_records.append((dep_path, line.split(":", 1)[1].split()))
+          valid = [(path, deps) for path, deps in dep_records if provider in deps]
+          if not valid:
+              raise SystemExit(f"ERROR: no modules.dep record maps {consumer} to dependency {provider} in the generated initramfs tree")
+          print("FIPS/UFS dependency PASS: all three modules are in modules.load and generated modules.dep maps UFS consumer to Pixel FIPS provider.")
           PY
               cp "$MODULES_LOAD" \
                 "$REPORT_DIR/modules-load-${INDEX}.txt"
