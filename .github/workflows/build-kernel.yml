@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - phase2/rtl8187b-driver-audit
 
 permissions:
   contents: read
@@ -217,7 +218,7 @@ jobs:
             echo "FIPS module: native in-tree"
             echo "FIPS HMAC postlink: required"
             echo "KernelSU Inline: disabled"
-            echo "RTL8187: excluded"
+            echo "RTL8187: enabled as an on-demand USB module"
             echo "MT76: excluded"
             echo "Phone flash: disabled"
             echo "Repo source cache: enabled"
@@ -473,6 +474,7 @@ jobs:
           CONFIG_CFG80211=m
           CONFIG_MAC80211=m
           CONFIG_USB=y
+          CONFIG_RTL8187=m
           CONFIG_CRYPTO_FIPS140_MOD=m
           EOF
           echo "=== FIPS defconfig ==="
@@ -531,18 +533,25 @@ jobs:
                   "ERROR: Existing additional_kmi_symbol_lists "
                   "does not contain the FIPS ABI label."
               )
-          if '"crypto/fips140.ko"' not in text:
+          required_module_outs = [
+              "crypto/fips140.ko",
+              "drivers/net/wireless/realtek/rtl8187/rtl8187.ko",
+              "drivers/misc/eeprom/eeprom_93cx6.ko",
+          ]
+          if not all(f'"{item}"' in text for item in required_module_outs):
               old = "module_outs = ZUMA_MODULE_OUTS,"
               if old not in text:
-                  raise SystemExit(
-                      "ERROR: module_outs = ZUMA_MODULE_OUTS not found"
-                  )
+                  raise SystemExit("ERROR: module_outs = ZUMA_MODULE_OUTS not found")
               text = text.replace(
                   old,
                   'module_outs = ZUMA_MODULE_OUTS + '
-                  '["crypto/fips140.ko"],',
+                  '["crypto/fips140.ko", '
+                  '"drivers/net/wireless/realtek/rtl8187/rtl8187.ko", '
+                  '"drivers/misc/eeprom/eeprom_93cx6.ko"],',
                   1
               )
+          if not all(f'"{item}"' in text for item in required_module_outs):
+              raise SystemExit("ERROR: required FIPS/RTL8187/EEPROM module_outs entries missing")
           build.write_text(text)
           fips_entry = "kernel/crypto/fips140.ko"
           zuma_lines = zuma_ramdisk.read_text().splitlines()
@@ -836,6 +845,7 @@ jobs:
             "CONFIG_CFG80211=m"
             "CONFIG_MAC80211=m"
             "CONFIG_USB=y"
+            "CONFIG_RTL8187=m"
             "CONFIG_CRYPTO_FIPS140_MOD=m"
           )
           for SETTING in "${EXPECTED_CONFIG[@]}"; do
@@ -850,6 +860,11 @@ jobs:
             grep -n '^CONFIG_KSU=' "$CONFIG"
             exit 1
           fi
+          if ! grep -Eq '^CONFIG_EEPROM_93CX6=(m|y)$' "$CONFIG"; then
+            echo "ERROR: EEPROM_93CX6 is not enabled in final kernel config."
+            exit 1
+          fi
+          grep -E '^CONFIG_EEPROM_93CX6=' "$CONFIG" | tee -a "$REPORT"
           echo "CONFIG_KSU: disabled (not enabled in kernel config)" | tee -a "$REPORT"
           echo
           echo "=== Distribution config comparison ==="
@@ -1252,25 +1267,20 @@ jobs:
             | tee -a "$REPORT_DIR/ramdisk-diagnostics.txt"
           echo "Ramdisk diagnostics collected."
 
-      - name: Verify excluded Wi-Fi modules
+      - name: Verify enabled Wi-Fi modules and KernelSU exclusion
         if: success()
         shell: bash
         run: |
           set -euo pipefail
           cd "$WORKSPACE"
-          if find . -type f \
-            \( -name '*rtl8187*.ko' \
-            -o -name '*mt76*.ko' \) \
-            -not -path './build-report/*' \
-            | grep .; then
-            echo "ERROR: RTL8187 or MT76 module found."
+          if find . -type f -name '*mt76*.ko' -not -path './build-report/*' | grep -q .; then
+            echo "ERROR: MT76 module unexpectedly present."
             exit 1
           fi
-          echo "RTL8187: excluded"
           echo "MT76: excluded"
-          for MODULE in cfg80211.ko mac80211.ko; do
+          for MODULE in cfg80211.ko mac80211.ko rtl8187.ko eeprom_93cx6.ko; do
             if ! find . -type f -name "$MODULE" -not -path './build-report/*' | grep -q .; then
-              echo "ERROR: Required NetHunter wireless module missing: $MODULE"
+              echo "ERROR: Required wireless module missing: $MODULE"
               exit 1
             fi
             echo "$MODULE: present"
@@ -1280,6 +1290,14 @@ jobs:
             exit 1
           fi
           echo "KernelSU module: absent"
+
+      - name: Audit RTL8187 module and dependency compatibility
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/scripts/audit-rtl8187.sh" \
+            "$WORKSPACE" "$EXPECTED_KERNEL_RELEASE" "$REPORT_DIR" "$FIPS_CONFIG"
 
       - name: Collect build outputs and reports
         if: always()
@@ -1327,6 +1345,8 @@ jobs:
             -o -name system_dlkm.img \
             -o -name dtbo.img \
             -o -name fips140.ko \
+            -o -name rtl8187.ko \
+            -o -name eeprom_93cx6.ko \
             -o -name modules.load \
             -o -name modules.dep \
             -o -name modules.softdep \) \
