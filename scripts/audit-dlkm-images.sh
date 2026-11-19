@@ -34,11 +34,11 @@ debugfs -R "rdump / $TMP/system" "$SYSTEM_IMAGE" >"$TMP/system-rdump.log" 2>&1 |
     debugfs -R stats "$image" 2>&1 | grep -E 'Block count:|Block size:|Free blocks:|Inode count:|Free inodes:' || true
   done
   echo "=== vendor_dlkm largest files ==="
-  find "$TMP/vendor" -type f -printf '%s %p\n | sort -nr | head -30
+  find "$TMP/vendor" -type f -printf '%s %p\n' | sort -nr | head -30
   echo "=== vendor_dlkm modules.load ==="
-  find "$TMP/vendor" -type f -path '*/lib/modules/*/modules.load' -print -exec cat {} \;
+  find "$TMP/vendor" -type f -path '*/lib/modules/*/modules.load' -print -exec cat {} +
   echo "=== system_dlkm largest files ==="
-  find "$TMP/system" -type f -printf '%s %p\\n' | sort -nr | head -20
+  find "$TMP/system" -type f -printf '%s %p\n' | sort -nr | head -20
 } | tee "$REPORT_DIR/dlkm-filesystem-diagnostics.txt"
 
 mapfile -t RTL_FILES < <(find "$TMP/vendor" "$TMP/system" -type f -name rtl8187.ko -print | sort)
